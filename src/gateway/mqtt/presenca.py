@@ -4,9 +4,9 @@ import logging
 from typing import TYPE_CHECKING
 
 import aiomqtt
-from gateway.bluetooth.domain.erros import BrokerIndisponivel
-from gateway.mqtt.conexao import ConexaoBroker
-from gateway.mqtt.domain.models import EstadoPresenca, Mensagem, TipoMensagem
+from bluetooth.domain.erros import BrokerIndisponivel
+from mqtt.conexao import ConexaoBroker
+from mqtt.domain.models import EstadoPresenca, Mensagem, TipoMensagem
 from mqtt.domain.topicos import Topicos
 
 
@@ -79,9 +79,9 @@ class PresencaColetor:
         descarta a última vontade, então este é o único aviso de offline. Depois dele, 
         o sinal de vida para e as reconexões não anunciam mais online.
         """
-        self._encerrdaa = True
+        self._encerrada = True
         if await self._publicar(EstadoPresenca.OFFLINE):
-            logging.info(f"Presença: {EstadoPresenca.ONLINE.value} | Coletor: {self.broker.coletor_id} ")
+            logging.info(f"Presença: {EstadoPresenca.OFFLINE.value} | Coletor: {self.broker.coletor_id} ")
 
 
     async def  atualiar_pulseira(self, pulseira: str | None = None) -> None:
