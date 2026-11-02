@@ -4,9 +4,9 @@ import logging
 from typing import TYPE_CHECKING
 
 import aiomqtt
-from gateway.bluetooth.domain.erros import BrokerIndisponivel
-from gateway.mqtt.conexao import ConexaoBroker
-from gateway.mqtt.domain.models import EstadoPresenca, Mensagem, TipoMensagem
+from bluetooth.domain.erros import BrokerIndisponivel
+from mqtt.conexao import ConexaoBroker
+from mqtt.domain.models import EstadoPresenca, Mensagem, TipoMensagem
 from mqtt.domain.topicos import Topicos
 
 
