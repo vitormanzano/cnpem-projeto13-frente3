@@ -60,9 +60,9 @@ class ConexaoBroker:
         )
         self.ao_receber = ao_receber
         self.ultima_vontade = ultima_vontade
-        self.ao_conectar = ao_conectar
         self._client: aiomqtt.Client | None = None
         self._assinaturas: dict[str, int] = {}
+        self.ao_conectar: list[TratadorConexao] = [ao_conectar] if ao_conectar else []
 
 
     @property
@@ -178,14 +178,18 @@ class ConexaoBroker:
 
 
     async def _executar_ao_conectar(self) -> None:
-        if self.ao_conectar is None:
-            return
+        for tratador in self.ao_conectar:
+            try:
+                resultado = self.ao_conectar()
+                if inspect.isawaitable(resultado):
+                    await resultado
+            except  Exception as e:
+                # Uma falha no gancho não pode derrubar a sessão com o broker
+                logging.exception(f"Erro ao executar ao_conectar [{type(e).__name__}]: {e}")
 
-        try:
-            resultado = self.ao_conectar()
-            if inspect.isawaitable(resultado):
-                await resultado
 
-        except  Exception as e:
-            # Uma falha no gancho não pode derrubar a sessão com o broker
-            logging.exception(f"Erro ao executar ao_conectar [{type(e).__name__}]: {e}")
+    def adicionar_ao_conectar(self, tratador: TratadorConexao) -> None:
+        """Registra uma função chamada a cada (re)conexão, na ordem de registro."""
+        self.ao_conectar.append(tratador)
+
+
