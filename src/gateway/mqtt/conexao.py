@@ -24,7 +24,7 @@ class ConexaoBroker:
 
     def __init__(
         self,
-        cliente_id: str | None = None,
+        cliente_id: str ,
         host: str | None = None,
         porta: int | None = None,
         usuario: str | None = None,
@@ -36,8 +36,7 @@ class ConexaoBroker:
     ) -> None:
         """
         Args:
-            cliente_id (str | None): Identificador único do coletor, usado como client id. Se omitido,
-                é lido da variável de ambiente COLETOR_ID (padrão: hostname da máquina).
+            cliente_id (str | None): Identificador único do cliente, usado como client id.
             host (str | None): Endereço do broker. Se omitido, é lido de BROKER_HOST (padrão: localhost).
             porta (int | None): Porta do broker. Se omitida, é lida de BROKER_PORTA (padrão: 1883).
             usuario (str | None): Usuário do broker. Se omitido, é lido de BROKER_USUARIO.
@@ -50,7 +49,7 @@ class ConexaoBroker:
             ao_conectar (TratadorConexao | None): Função chamada a cada (re)conexão ao broker, 
                 depois de refazer as assinaturas.
         """
-        self.cliente_id  = cliente_id
+        self.cliente_id = cliente_id
         self.host = host or os.getenv("BROKER_HOST", HOST_PADRAO)
         self.porta = porta or int(os.getenv("BROKER_PORTA", PORTA_PADRAO))
         self.usuario = usuario or os.getenv("BROKER_USUARIO") or None
