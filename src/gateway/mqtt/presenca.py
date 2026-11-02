@@ -26,10 +26,10 @@ def ler_intervalo_sinal_de_vida(intervalo: float | None = None) -> float:
         ValueError: Se o intervalo não for positivo ou a variável de ambiente não for um número.
     """
     if intervalo is None:
-        intervalo = float(os.getenv("PRESENCA_INTERVALO", INTERVALO_SINAL_DE_VIDA_PADRAO))
+        intervalo = float(os.getenv("PRESENCA_INTERVALO_COLETOR", INTERVALO_SINAL_DE_VIDA_PADRAO))
 
     if intervalo <= 0:
-        raise ValueError("PRESENCA_INTERVALO deve ser maior que zero.")
+        raise ValueError("PRESENCA_INTERVALO_COLETOR deve ser maior que zero.")
     return intervalo
 
 
