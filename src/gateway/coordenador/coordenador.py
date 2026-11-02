@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 
 import aiomqtt
 from bluetooth.domain.erros import BrokerIndisponivel
+from gateway.bluetooth.domain.models import EstadoConexao
+from gateway.coordenador.visao import VisaoColetores
 from mqtt.conexao import ConexaoBroker
 from mqtt.domain.models import EstadoPresenca, Mensagem, TipoMensagem
 from mqtt.domain.topicos import Topicos
@@ -47,17 +49,79 @@ class Coordenador:
                 ValueError: Se o intervalo for válido.
         """
         self.broker: ConexaoBroker = broker
-        self.intervalo: float = ler_intervalo_sinal_de_vida(intervalo)
-        self._encerrada = False
+        self.intervalo: float      = ler_intervalo_sinal_de_vida(intervalo)
+        self.visao                 = VisaoColetores()
+        self._encerrada            = False
         
         self.broker.ultima_vontade = self._ultima_vontade()
-        self.broker.ao_conectar = self.anunciar_online
+        self.broker.ao_conectar    = self.anunciar_online
+        self.broker.ao_receber     = self.ao_receber
 
 
-    @property
-    def topicos(self) -> list[str]:
-        return [Topicos.presenca_coordenador()]
+    async def assinar_topicos(self) -> None:
+        """Assina, presença, sinal e posse de todos os coletores e pulseiras.
 
+        Pode ser chamado antes de conectar: a ConexaoBroker refaz as assinaturas de cada
+        (re)conexão, e o broker entrega na hora as mensagens retidas de presença e posse.
+        """
+        await self.broker.assinar(Topicos.presenca_coletor("+"))
+        await self.broker.assinar(Topicos.estado_rssi("+", "+"), qos=0)
+        await self.broker.assinar(Topicos.estado_posse("+"))
+
+    
+    async def ao_receber(self, topico: str, mensagem: Mensagem) -> None:
+        """Encaminha cada mensagem pelo tipo; o tópico só é usado para extrair os ids."""
+        match mensagem.tipo:
+            case TipoMensagem.PRESENCA:
+                self._tratar_presenca(topico, mensagem)
+            case TipoMensagem.ESTADO_PULSEIRA:
+                self._tratar_sinal(topico, mensagem)
+            case TipoMensagem.POSSE:
+                self._tratar_posse(topico, mensagem)
+
+
+    def _tratar_presenca(self, topico: str, mensagem: Mensagem) -> None:
+        coletor = Topicos.extrair_presenca_coletor(topico)
+        if coletor is None:
+            return
+
+        online = mensagem.conteudo.get("estado") == EstadoPresenca.ONLINE.value
+        # Só registra mudança; o sinal de vida a cada 5 s não deve poluir o log
+        if self.visao.atualizar_presenca(coletor, online):
+            estado = EstadoPresenca.ONLINE if online else EstadoPresenca.OFFLINE
+            logging.info(f"Presença | Coletor: {coletor} | {estado.value}")
+
+
+    def _tratar_sinal(self, topico: str, mensagem: Mensagem) -> None:
+        ids = Topicos.extrair_estado_rssi(topico)
+        if ids is None: 
+            return
+        coletor, pulseira = ids
+
+        if mensagem.origem != coletor:
+            logging.warning(f"Sinal descartado | {topico} | origem {mensagem.origem} não é o coletor do tópico")
+            return
+
+        try:
+            estado = EstadoConexao(mensagem.conteudo["estado"])
+            rssi = mensagem.conteudo.get("rssi")
+            rssi = None if rssi is none else int(rssi)
+        except (KeyError, ValueError, TypeError) as e:
+            logging.warning(f"Sinal descartado | {topico} | conteúdo inválido [{type(e).__name__}]: {e}")
+            return
+
+        sinal = self.visao.registrar_sinal(pulseira, coletor, estado, rssi)
+        logging.debug(
+            f"Sinal | Pulseira: {pulseira} | Coletor: {coletor} | {estado.value} | "
+            f"RSSI: {rssi} | suavizado: {sinal.rssi_suavizado}"
+        )
+
+
+        def _tratar_posse(self, topico: str, mensagem: Mensagem) -> None:
+            pulseira = Topicos.extrair_estado_posse(topico)
+            if pulseira is None:
+                return
+            self.visao.atualizar_posse(pulseira, mensagem.conteudo.get("coletor"))
 
     async def anunciar_online(self) -> None:
         """Publica a presença online (retida) no encerramento controlado."""
@@ -138,3 +202,6 @@ class Coordenador:
                 qos=config.qos,
                 retain=config.retida,
         )
+
+
+    async def _escutar_rssi()
