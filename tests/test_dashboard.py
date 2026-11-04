@@ -10,7 +10,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "gateway" / "dashboard"))
 
 from hub import Hub  # noqa: E402
-from sensor import parse_heart_rate  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from sensor import describe_services, parse_heart_rate, skin_contact, valid_heart_rate  # noqa: E402
 
 
 def test_fc_8_bits():
@@ -33,6 +35,32 @@ def test_pacote_invalido():
         except ValueError:
             continue
         raise AssertionError(f"deveria rejeitar {ruim!r}")
+
+
+def test_contato_com_a_pele():
+    assert skin_contact(bytes([0x00, 72])) is None    # pulseira não informa contato
+    assert skin_contact(bytes([0x06, 72])) is True    # suportado + detectado
+    assert skin_contact(bytes([0x04, 72])) is False   # suportado, sem contato
+
+
+def test_fc_zero_ou_implausivel_e_descartada():
+    assert valid_heart_rate(bytes([0x00, 0])) is None             # 0 bpm = sem pulso detectado
+    assert valid_heart_rate(bytes([0x01, 0x2C, 0x01])) is None    # 300 bpm
+    assert valid_heart_rate(bytes([0x04, 72])) is None            # sem contato com a pele
+    assert valid_heart_rate(bytes([0x06, 72])) == 72
+    assert valid_heart_rate(bytes([0x00, 72])) == 72
+
+
+def test_lista_de_servicos():
+    fc = SimpleNamespace(uuid="0000180D-0000-1000-8000-00805f9b34fb", description="Heart Rate", characteristics=[
+        SimpleNamespace(uuid="00002a37-0000-1000-8000-00805f9b34fb", description="Heart Rate Measurement",
+                        properties=["notify"])])
+    pmd = SimpleNamespace(uuid="fb005c80-02e7-f387-1cad-8acd2d8df0c8", description="Unknown", characteristics=[])
+    outro = SimpleNamespace(uuid="12345678-0000-0000-0000-000000000000", description="Unknown", characteristics=[])
+    lista = describe_services([fc, pmd, outro])
+    assert lista[0]["in_use"] and lista[0]["chars"][0]["props"] == ["notify"]
+    assert lista[1]["name"].startswith("Polar PMD") and not lista[1]["in_use"]
+    assert lista[2]["name"] == "Desconhecido"
 
 
 def test_rssi_suavizado_e_limpeza():

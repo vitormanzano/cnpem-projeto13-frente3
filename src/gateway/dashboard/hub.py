@@ -31,6 +31,8 @@ class Hub:
         self._hr_min: int | None = None
         self._hr_max: int | None = None
 
+        self.services: list[dict] = []   # serviços GATT da última conexão (só para exibição)
+
         self.history: deque[dict] = deque(maxlen=HISTORY_SIZE)
         self._subs: set[asyncio.Queue] = set()
 
@@ -52,6 +54,9 @@ class Hub:
             self.rssi_avg = float(dbm)
         else:
             self.rssi_avg += RSSI_EMA_ALPHA * (dbm - self.rssi_avg)
+
+    def set_services(self, services: list[dict]) -> None:
+        self.services = services
 
     def clear_signal(self) -> None:
         """Perdeu a conexão: some com os valores antigos em vez de congelá-los."""

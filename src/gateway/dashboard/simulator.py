@@ -6,11 +6,29 @@ import time
 
 from hub import Hub
 
+_BASE = "0000{}-0000-1000-8000-00805f9b34fb"
+SERVICOS_FALSOS = [
+    {"uuid": _BASE.format("180d"), "name": "Heart Rate", "in_use": True, "chars": [
+        {"uuid": _BASE.format("2a37"), "name": "Heart Rate Measurement", "props": ["notify"]},
+        {"uuid": _BASE.format("2a38"), "name": "Body Sensor Location", "props": ["read"]}]},
+    {"uuid": _BASE.format("180f"), "name": "Battery Service", "in_use": False, "chars": [
+        {"uuid": _BASE.format("2a19"), "name": "Battery Level", "props": ["read", "notify"]}]},
+    {"uuid": _BASE.format("180a"), "name": "Device Information", "in_use": False, "chars": [
+        {"uuid": _BASE.format("2a29"), "name": "Manufacturer Name String", "props": ["read"]},
+        {"uuid": _BASE.format("2a24"), "name": "Model Number String", "props": ["read"]},
+        {"uuid": _BASE.format("2a26"), "name": "Firmware Revision String", "props": ["read"]}]},
+    {"uuid": "fb005c80-02e7-f387-1cad-8acd2d8df0c8",
+     "name": "Polar PMD (PPG, acelerômetro, giroscópio, magnetômetro)", "in_use": False, "chars": [
+        {"uuid": "fb005c81-02e7-f387-1cad-8acd2d8df0c8", "name": "PMD: controle", "props": ["read", "write", "indicate"]},
+        {"uuid": "fb005c82-02e7-f387-1cad-8acd2d8df0c8", "name": "PMD: dados", "props": ["notify"]}]},
+]
+
 
 async def run(hub: Hub, seed: int | None = None) -> None:
     rnd = random.Random(seed)
     hub.source = "simulado"
     hub.set_status("conectado", "", device="Simulador · sem pulseira")
+    hub.set_services(SERVICOS_FALSOS)
 
     t0 = time.time()
     hr = 74.0

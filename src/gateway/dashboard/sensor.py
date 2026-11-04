@@ -13,7 +13,18 @@ import asyncio
 from hub import Hub
 
 HR_MEASUREMENT_UUID = "00002a37-0000-1000-8000-00805f9b34fb"
+HR_SERVICE_UUID = "0000180d-0000-1000-8000-00805f9b34fb"
 RETRY_S = 3.0
+HR_MIN, HR_MAX = 20, 250   # faixa plausível de FC; fora disso a leitura é descartada
+SEM_CONTATO = "Sem leitura válida de FC: verifique se a pulseira está bem presa à pele."
+
+# Serviços proprietários que o Bleak não sabe nomear sozinho
+NOMES_POLAR = {
+    "fb005c80-02e7-f387-1cad-8acd2d8df0c8": "Polar PMD (PPG, acelerômetro, giroscópio, magnetômetro)",
+    "fb005c81-02e7-f387-1cad-8acd2d8df0c8": "PMD: controle",
+    "fb005c82-02e7-f387-1cad-8acd2d8df0c8": "PMD: dados",
+    "0000feee-0000-1000-8000-00805f9b34fb": "Polar PSFTP (arquivos e configurações)",
+}
 
 
 def parse_heart_rate(data: bytes) -> int:
@@ -28,6 +39,46 @@ def parse_heart_rate(data: bytes) -> int:
             raise ValueError("pacote de FC de 16 bits incompleto")
         return int.from_bytes(data[1:3], "little")
     return data[1]
+
+
+def skin_contact(data: bytes) -> bool | None:
+    """Bits 1-2 das flags: contato com a pele. None se a pulseira não informa."""
+    if not data[0] & 0x04:
+        return None
+    return bool(data[0] & 0x02)
+
+
+def valid_heart_rate(data: bytes) -> int | None:
+    """FC do pacote, ou None se não houver contato ou o valor for implausível.
+
+    Sem contato a Polar costuma mandar 0 bpm; isso não pode virar leitura.
+    """
+    bpm = parse_heart_rate(data)
+    if skin_contact(data) is False or not HR_MIN <= bpm <= HR_MAX:
+        return None
+    return bpm
+
+
+def _nome(item) -> str:
+    uuid = item.uuid.lower()
+    desc = item.description or ""
+    return NOMES_POLAR.get(uuid) or (desc if desc and desc != "Unknown" else "Desconhecido")
+
+
+def describe_services(services) -> list[dict]:
+    """Lista os serviços GATT (e suas características) para exibir no painel."""
+    return [
+        {
+            "uuid": s.uuid.lower(),
+            "name": _nome(s),
+            "in_use": s.uuid.lower() == HR_SERVICE_UUID,
+            "chars": [
+                {"uuid": c.uuid.lower(), "name": _nome(c), "props": list(c.properties)}
+                for c in s.characteristics
+            ],
+        }
+        for s in services
+    ]
 
 
 class PolarSensor:
@@ -108,13 +159,20 @@ class PolarSensor:
 
         def ao_receber_fc(_sender, data: bytearray) -> None:
             try:
-                hub.update_hr(parse_heart_rate(bytes(data)))
+                bpm = valid_heart_rate(bytes(data))
             except ValueError:
-                pass  # pacote malformado: ignora
+                return  # pacote malformado: ignora
+            if bpm is None:
+                hub.set_status("conectado", SEM_CONTATO)  # valor antigo some sozinho após STALE_AFTER_S
+                return
+            if hub.detail:
+                hub.set_status("conectado", "")
+            hub.update_hr(bpm)
 
         scanner = None
         try:
             async with BleakClient(device, disconnected_callback=ao_desconectar, timeout=20.0) as client:
+                hub.set_services(describe_services(client.services))
                 await client.start_notify(HR_MEASUREMENT_UUID, ao_receber_fc)
                 hub.set_status("conectado", "")
 

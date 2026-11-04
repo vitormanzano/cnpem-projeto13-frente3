@@ -59,6 +59,9 @@ async def _tratar_cliente(hub: Hub, reader: asyncio.StreamReader, writer: asynci
         elif caminho == "/api/history":
             corpo = json.dumps(list(hub.history)).encode()
             writer.write(_resposta("200 OK", "application/json", corpo))
+        elif caminho == "/api/services":
+            corpo = json.dumps({"device": hub.device, "services": hub.services}).encode()
+            writer.write(_resposta("200 OK", "application/json", corpo))
         elif caminho == "/events":
             await _fluxo_sse(hub, writer)
         else:
