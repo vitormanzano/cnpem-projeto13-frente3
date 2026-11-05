@@ -56,8 +56,7 @@ class PresencaColetor:
         self._encerrada = False
 
         self.broker.ultima_vontade = self._ultima_vontade()
-        self.broker.ao_conectar = self.anunciar_online
-
+        self.broker.adicionar_ao_conectar(self.anunciar_offline)
 
     @property
     def topico(self) -> str:
@@ -127,7 +126,6 @@ class PresencaColetor:
             },
         )
 
-    
     async def _publicar(self, estado: EstadoPresenca) -> bool:
         """Publica a presença. Devolve False se o broker estiver indisponível, sem lançar erro."""
         try:

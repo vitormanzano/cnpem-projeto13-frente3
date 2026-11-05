@@ -54,7 +54,7 @@ class Coordenador:
         self._encerrada            = False
         
         self.broker.ultima_vontade = self._ultima_vontade()
-        self.broker.ao_conectar    = self.anunciar_online
+        self.broker.adicionar_ao_conectar(self.anunciar_online)
         self.broker.ao_receber     = self.ao_receber
 
 
