@@ -78,7 +78,7 @@ async def varrer_pulseira(endereco: str, ao_anuncio: Callable[[Pulseira], None])
     """
     def ao_detectar(dev: BLEDevice, adv: AdvertisementData) -> None:
         if dev.address.upper() == endereco.upper():
-            ao_anuncio(Pulseira(endereco=dev.address, nome=adv.local_nane or dev.name or NOME_PADRAO, rssi=adv.rssi))
+            ao_anuncio(Pulseira(endereco=dev.address, nome=adv.local_name or dev.name or NOME_PADRAO, rssi=adv.rssi))
 
     scanner = BleakScanner(detection_callback=ao_detectar)
     try:

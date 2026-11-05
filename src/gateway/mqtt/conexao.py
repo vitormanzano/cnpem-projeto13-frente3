@@ -187,7 +187,7 @@ class ConexaoBroker:
     async def _executar_ao_conectar(self) -> None:
         for tratador in self._ao_conectar:
             try:
-                resultado = self.ao_conectar()
+                resultado = tratador()
                 if inspect.isawaitable(resultado):
                     await resultado
             except  Exception as e:

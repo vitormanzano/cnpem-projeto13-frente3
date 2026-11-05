@@ -2,6 +2,8 @@ import asyncio
 import os
 import socket
 
+from gateway.bluetooth.scanner import VarreduraPulseira
+from gateway.mqtt.estado_rssi import EstadoRssiColetor
 from mqtt.domain.models import Mensagem
 from mqtt.domain.topicos import Topicos
 from mqtt.presenca import PresencaColetor
@@ -22,9 +24,12 @@ def identificador_coletor() -> str:
 class Coletor:
     """Coletor BLE: Realiza todas as ações que um coletor precisa."""
 
-    def __init__(self, broker: ConexaoBroker) -> None:
+    def __init__(self, broker: ConexaoBroker, endereco_pulseira: str) -> None:
         self.broker = broker
         self.presenca = PresencaColetor(broker) # antes de conectar: registra a última vontade
+        self.estado_rssi = EstadoRssiColetor(broker) # O online sai antes do RSSI
+        self.varredura = VarreduraPulseira(endereco_pulseira)
+        self.varredura.ao_ler = self.estado_rssi.registrar # Cada leitura entra na fila de publicação
         self.broker.ao_receber = self.ao_receber
 
 
@@ -46,6 +51,8 @@ class Coletor:
         tarefas = {
             asyncio.create_task(self.broker.manter_conexao()),
             asyncio.create_task(self.presenca.manter_sinal_de_vida()),
+            asyncio.create_task(self.estado_rssi.manter_publicacao()),
+            asyncio.create_task(self.varredura.executar())
         }
         try:
             await asyncio.wait(tarefas, return_when=asyncio.FIRST_EXCEPTION)

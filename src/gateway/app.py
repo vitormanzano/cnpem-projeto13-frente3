@@ -21,8 +21,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 async def rodar_coletor() -> None:
     cliente_id = identificador_coletor()
+    endereco = os.getenv("TARGET_ADDRESS")
+    if not endereco:
+        raise SystemExit("Defina TARGET_ADDRESS.")
     logging.info(f"Iniciando como coletor | id {cliente_id}")
-    coletor = Coletor(ConexaoBroker(cliente_id=cliente_id))
+    coletor = Coletor(ConexaoBroker(cliente_id=cliente_id), endereco)
     await coletor.assinar_topicos()
     await coletor.executar()
 
