@@ -97,3 +97,9 @@ class VisaoColetores:
             ):
                 resultado[coletor] = sinal
         return resultado
+
+
+    def limpar_amostras(self, pulseira: str) -> None:
+        """A disputa de um handoff só deve comparar leituras feitas depois da liberação."""
+        for sinal in self.sinais.get(pulseira, {}).values():
+            sinal.amostras.clear()

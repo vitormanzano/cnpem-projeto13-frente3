@@ -36,6 +36,15 @@ class Topicos:
 
 
     @staticmethod
+    def extrair_solicitacoes_posse(topico: str) -> str | None:
+        """Devolve a pulseira de pulseiras/{pulseira}/solicitacoes, ou None se o tópico for outro."""
+        partes = topico.split("/")
+        if len(partes) == 3 and partes[0] == "pulseiras" and partes[2] == "solicitacoes":
+            return partes[1]
+        return None
+
+
+    @staticmethod
     def frequencia_cardiaca(pulseira: str) -> str:
         """Coletor ativo: Leituras de frequência cardíaca"""
         return f"pulseiras/{pulseira}/frequencia-cardiaca"

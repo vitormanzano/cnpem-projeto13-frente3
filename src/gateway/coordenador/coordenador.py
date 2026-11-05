@@ -5,14 +5,20 @@ from typing import TYPE_CHECKING
 
 import aiomqtt
 from bluetooth.domain.erros import BrokerIndisponivel
-from gateway.bluetooth.domain.models import EstadoConexao
-from gateway.coordenador.visao import VisaoColetores
+from bluetooth.domain.models import EstadoConexao
+from gateway.coordenador.decisao import MARGEM_HISTERESE_PADRAO, escolher_coletor
+from gateway.coordenador.visao import SinalColetor, VisaoColetores
 from mqtt.conexao import ConexaoBroker
 from mqtt.domain.models import EstadoPresenca, Mensagem, TipoMensagem
 from mqtt.domain.topicos import Topicos
 
 
 INTERVALO_SINAL_DE_VIDA_PADRAO = 5.0
+JANELA_DISPUTA_PADRAO          = 1.0
+JANELA_HANDOFF_PADRAO          = 3.0
+LIMIAR_CONEXAO_FRACA_PADRAO    = -78
+LEITURAS_FRACAS_PADRAO         = 3
+PRAZO_LIBERACAO_PADRAO         = 3.0 # s para a origem confirmar que soltou
 
 
 if TYPE_CHECKING:
@@ -22,16 +28,16 @@ if TYPE_CHECKING:
 def ler_intervalo_sinal_de_vida(intervalo: float | None = None) -> float:
     """Resolve o intervalo de sinal de vida.
 
-    Se omitido, é lido da variável de ambiente PRESENCA_INTERVALO (padrão de 5 s).
+    Se omitido, é lido da variável de ambiente PRESENCA_INTERVALO_COORDENADOR (padrão de 5 s).
 
-    Raises: 
+    Raises:
         ValueError: Se o intervalo não for positivo ou a variável de ambiente não for um número.
     """
     if intervalo is None:
         intervalo = float(os.getenv("PRESENCA_INTERVALO_COORDENADOR", INTERVALO_SINAL_DE_VIDA_PADRAO))
 
     if intervalo <= 0:
-        raise ValueError("PRESENCA_INTERVALO_COLETOR deve ser maior que zero.")
+        raise ValueError("PRESENCA_INTERVALO_COORDENADOR deve ser maior que zero.")
     return intervalo
 
 
@@ -57,6 +63,17 @@ class Coordenador:
         self.broker.adicionar_ao_conectar(self.anunciar_online)
         self.broker.ao_receber     = self.ao_receber
 
+        self.janela_disputa                        = float(os.getenv("JANELA_DISPUTA", JANELA_DISPUTA_PADRAO))
+        self.janela_handoff                        = float(os.getenv("JANELA_HANDOFF", JANELA_HANDOFF_PADRAO))
+        self.limiar                                = int(os.getenv("LIMIAR_CONEXAO_FRACA", LIMIAR_CONEXAO_FRACA_PADRAO))
+        self.minimo_fracas                         = int(os.getenv("LEITURAS_FRACAS", LEITURAS_FRACAS_PADRAO))
+        self.prazo_liberacao                       = float(os.getenv("PRAZO_LIBERACAO", PRAZO_LIBERACAO_PADRAO))
+        self.margem                                = float(os.getenv("MARGEM_HISTERESE", MARGEM_HISTERESE_PADRAO))
+
+        self._liberacoes:      dict[str, asyncio.Event] = {} # Pulseira -> handoff aguardando a origem
+        self._disputas:        dict[str, asyncio.Task] = {}  # Pulseira -> Janela em andamento
+        self._leituras_fracas: dict[str, int] = {}           # Pulseira -> leituras fracas seguidas do dono
+
 
     async def assinar_topicos(self) -> None:
         """Assina, presença, sinal e posse de todos os coletores e pulseiras.
@@ -67,6 +84,7 @@ class Coordenador:
         await self.broker.assinar(Topicos.presenca_coletor("+"))
         await self.broker.assinar(Topicos.estado_rssi("+", "+"), qos=0)
         await self.broker.assinar(Topicos.estado_posse("+"))
+        await self.broker.assinar(Topicos.solicitacoes_posse("+"))
 
     
     async def ao_receber(self, topico: str, mensagem: Mensagem) -> None:
@@ -75,9 +93,11 @@ class Coordenador:
             case TipoMensagem.PRESENCA:
                 self._tratar_presenca(topico, mensagem)
             case TipoMensagem.ESTADO_PULSEIRA:
-                self._tratar_sinal(topico, mensagem)
+                await self._tratar_sinal(topico, mensagem)
             case TipoMensagem.POSSE:
                 self._tratar_posse(topico, mensagem)
+            case TipoMensagem.LIBERACAO_POSSE:
+                await self._tratar_liberacao(topico, mensagem)
 
 
     def _tratar_presenca(self, topico: str, mensagem: Mensagem) -> None:
@@ -92,7 +112,7 @@ class Coordenador:
             logging.info(f"Presença | Coletor: {coletor} | {estado.value}")
 
 
-    def _tratar_sinal(self, topico: str, mensagem: Mensagem) -> None:
+    async def _tratar_sinal(self, topico: str, mensagem: Mensagem) -> None:
         ids = Topicos.extrair_estado_rssi(topico)
         if ids is None: 
             return
@@ -113,8 +133,9 @@ class Coordenador:
         sinal = self.visao.registrar_sinal(pulseira, coletor, estado, rssi)
         logging.debug(
             f"Sinal | Pulseira: {pulseira} | Coletor: {coletor} | {estado.value} | "
-            f"RSSI: {rssi} | suavizado: {sinal.rssi_suavizado}"
+            f"RSSI: {rssi} | suavizado: {sinal.rssi_suavizada}"
         )
+        await self._avaliar(pulseira, coletor, sinal)
 
 
     def _tratar_posse(self, topico: str, mensagem: Mensagem) -> None:
@@ -122,6 +143,77 @@ class Coordenador:
         if pulseira is None:
             return
         self.visao.atualizar_posse(pulseira, mensagem.conteudo.get("coletor"))
+
+    
+    async def _tratar_liberacao(self, topico: str, mensagem: Mensagem) -> None:
+        pulseira = Topicos.extrair_solicitacoes_posse(topico)
+        if pulseira is None:
+            return
+        if mensagem.origem != self.visao.posse.get(pulseira):
+            logging.warning(f"Liberação descartada | Pulseira: {pulseira} | {mensagem.origem} não é o dono.")
+            return
+
+        logging.info(f"Liberação recebida | Pulseira: {pulseira} | Coletor: {mensagem.origem}")
+        if (evento := self._liberacoes.get(pulseira)) is not None:
+            # Resposta ao HANDOFF. Limpa aqui, e não em _conduzir_handoff, para não apagar
+            # leituras que cheguem entre esta mensagem e a retomada da tarefa.
+            self.visao.limpar_amostras(pulseira)
+            evento.set()
+            return
+        try:
+            # Coletor encerrado de forma controlada
+            await self._publicar_posse(pulseira, None)
+        except BrokerIndisponivel as e:
+            logging.warning(f"Erro: {BrokerIndisponivel.codigo} | Pulseira: {pulseira} | Posse não liberada: {e}")
+
+
+    async def _iniciar_handoff(self, pulseira: str, dono: str) -> None:
+        """Soltar e disputar: Manda a origem soltar; o resto acontece em _conduzir_handoff."""
+        logging.info(
+            f"Handoff iniciado | Pulseira: {pulseira} | Origem: {dono} | Motivo: conexao-fraca "
+            f"({self._leituras_fracas[pulseira]} leituras < {self.limiar} dBm)"
+        )
+        self._leituras_fracas[pulseira] = 0
+        comando = Mensagem(
+            tipo=TipoMensagem.HANDOFF,
+            origem=self.broker.cliente_id,
+            conteudo={
+                "pulseira": pulseira,
+                "origem": dono,
+                "destino": None,
+            }
+        )
+        # Criado antes do HANDOFF: a liberação pode ser processada antes de a tarefa começar a rodar
+        liberada = self._liberacoes[pulseira] = asyncio.Event()
+        try:
+            await self.broker.publicar(Topicos.handoff(pulseira), comando)
+        except BrokerIndisponivel as e:
+            self._liberacoes.pop(pulseira, None)
+            logging.warning(f"Erro: {BrokerIndisponivel.codigo} | Pulseira: {pulseira} | Handoff não iniciado: {e}")
+            return
+        self._disputas[pulseira] = asyncio.create_task(self._conduzir_handoff(pulseira, dono, liberada))
+
+
+    async def _conduzir_handoff(self, pulseira: str, dono: str, liberada: asyncio.Event) -> None:
+        """Espera a origem liberar, publica a posse como liberada e abre a disputa"""
+        try:
+            try:
+                await asyncio.wait_for(liberada.wait(), self.prazo_liberacao)
+            except TimeoutError:
+                logging.warning(
+                    f"Handoff cancelado | Pulseira: {pulseira} | "
+                    f"Origem {dono} não liberou em {self.prazo_liberacao:g} s; continua sendo dono."
+                )
+                return
+            await self._publicar_posse(pulseira, None)
+            logging.info(f"Disputa aberta | Pulseira: {pulseira} | Janela: {self.janela_handoff:g} s | Anterior: {dono}")
+            await self._encerrar_disputa(pulseira, self.janela_handoff, anterior=dono)
+        except BrokerIndisponivel as e:
+            logging.warning(f"Erro: {BrokerIndisponivel.codigo} | Pulseira: {pulseira} | Handoff interrompido: {e}")
+        finally:
+            self._liberacoes.pop(pulseira, None)
+            self._disputas.pop(pulseira, None)
+
 
     async def anunciar_online(self) -> None:
         """Publica a presença online (retida) no encerramento controlado."""
@@ -176,7 +268,7 @@ class Coordenador:
             return True
         except BrokerIndisponivel as e:
             logging.warning(
-                f"Erro: {BrokerIndisponivel.codigo} | Coletor: {self.broker.cliente_id } | "
+                f"Erro: {BrokerIndisponivel.codigo} | Coordenador: {self.broker.cliente_id} | "
                 f"Não foi possível publicar a presença {estado.value}: {e}"
             )
             return False
@@ -203,6 +295,85 @@ class Coordenador:
                 retain=config.retida,
         )
 
+    
+    async def _avaliar(self, pulseira: str, coletor: str, sinal: SinalColetor) -> None:
+        """Decide, a cada sinal, se a pulseira precisa de um coletor (novo ou outro)."""
+        if pulseira in self._disputas:
+            return # Em disputa de handoff
+
+        dono = self.visao.posse.get(pulseira)
+        if dono is None:
+            if self.visao.sinais_validos(pulseira):
+                self._abrir_disputa(pulseira, self.janela_disputa)
+            return
+
+        if coletor != dono or not self._conexao_fraca(pulseira, sinal):
+            return # Só a leitura do dono dispara handoff
+
+        sinais = self.visao.sinais_validos(pulseira)
+        if len(sinais) > 1 and escolher_coletor(sinais, atual=dono, margem=self.margem) == dono:
+            return # Nenhum vizinho é melhor pela margem
+
+        await self._iniciar_handoff(pulseira, dono)
+        
+            
+    def _conexao_fraca(self, pulseira: str, sinal: SinalColetor) -> bool: 
+        """Conexao-fraca após N leituras consecutivas do dono abaixo do limiar."""
+        if sinal.estado is EstadoConexao.CONECTADO and sinal.rssi is not None and sinal.rssi < self.limiar:
+            fracas = self._leituras_fracas.get(pulseira, 0) + 1
+        else:
+            fracas = 0
+        self._leituras_fracas[pulseira] = fracas
+        if fracas == self.minimo_fracas:
+            logging.info(f"Estado: conexao-fraca | Pulseira: {pulseira} | RSSI: {sinal.rssi} dBm.")
+        return fracas >= self.minimo_fracas
+
+
+    def _abrir_disputa(self, pulseira: str, janela: float, anterior: str | None = None) -> None:
+        logging.info(f"Disputa aberta | Pulseira: {pulseira} | Janela: {janela:g} s | Anterior: {anterior}")
+        self._disputas[pulseira] = asyncio.create_task(self._encerrar_disputa(pulseira, janela, anterior))
+
+
+    async def _encerrar_disputa(self, pulseira: str, janela: float, anterior: str | None) -> None:
+        """Ao fim da janela, concede a posse ao melhor sinal. No handoff `anterior` é o 'favorito'
+        pela margem e é o fallback se ninguém mais enxergar a pulseira.
+        """
+        try:
+            await asyncio.sleep(janela)
+            if anterior is None and self.visao.posse.get(pulseira) is not None:
+                return # a posse retida chegou durante a janela (coordenador acabou de ligar)
+
+            sinais = self.visao.sinais_validos(pulseira)
+            vencedor = escolher_coletor(sinais, atual=anterior, margem=self.margem)
+            motivo = "anterior mantido pela margem" if vencedor and vencedor == anterior else "Maior RSSI"
+            if vencedor is None and anterior in self.visao.coletores_online:
+                vencedor, motivo = anterior, "fallback: nenhum coletor enxergou a pulseira."
+            if vencedor is None:
+                logging.info(f"Disputa sem candidatos | Pulseira: {pulseira}")
+                return
+
+            await self._publicar_posse(pulseira, vencedor)
+            rssis = ", ".join(f"{c}: {s.rssi_suavizada:.1f}" for c, s in sinais.items())
+            logging.info(f"Posse concedida | Pulseira: {pulseira} | Coletor: {vencedor} | Motivo: {motivo} | RSSI [{rssis}]")
+        except BrokerIndisponivel as e:
+            logging.warning(f"Erro: {BrokerIndisponivel.codigo} | Pulseira: {pulseira} | Posse não publicada: {e}")
+        finally:
+            self._disputas.pop(pulseira, None)
+
+
+    async def _publicar_posse(self, pulseira: str, coletor: str | None) -> None:
+        """Publica a posse (retida) e já atualiza a visão, sem esperar o broker."""
+        mensagem = Mensagem(
+            tipo=TipoMensagem.POSSE,
+            origem=self.broker.cliente_id,
+            conteudo={
+                "pulseira": pulseira,
+                "coletor": coletor
+            }
+        )
+        await self.broker.publicar(Topicos.estado_posse(pulseira), mensagem)
+        self.visao.atualizar_posse(pulseira, coletor)
+    
 
     async def executar(self) -> None:
         """Inicia o coordenador."""
@@ -214,8 +385,9 @@ class Coordenador:
             concluidas, _ = await asyncio.wait(tarefas, return_when=asyncio.FIRST_EXCEPTION)
             for tarefa in concluidas:
                 tarefa.result()
-        finally: 
+        finally:
             await self.anunciar_offline()
+            tarefas |= set(self._disputas.values())  # Janelas de disputa/handoff em andamento
             for tarefa in tarefas:
                 tarefa.cancel()
             await asyncio.gather(*tarefas, return_exceptions=True)
