@@ -203,5 +203,3 @@ class Coordenador:
                 retain=config.retida,
         )
 
-
-    async def _escutar_rssi()
