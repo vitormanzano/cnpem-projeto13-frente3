@@ -105,7 +105,7 @@ class Coordenador:
         try:
             estado = EstadoConexao(mensagem.conteudo["estado"])
             rssi = mensagem.conteudo.get("rssi")
-            rssi = None if rssi is none else int(rssi)
+            rssi = None if rssi is None else int(rssi)
         except (KeyError, ValueError, TypeError) as e:
             logging.warning(f"Sinal descartado | {topico} | conteúdo inválido [{type(e).__name__}]: {e}")
             return
@@ -117,11 +117,11 @@ class Coordenador:
         )
 
 
-        def _tratar_posse(self, topico: str, mensagem: Mensagem) -> None:
-            pulseira = Topicos.extrair_estado_posse(topico)
-            if pulseira is None:
-                return
-            self.visao.atualizar_posse(pulseira, mensagem.conteudo.get("coletor"))
+    def _tratar_posse(self, topico: str, mensagem: Mensagem) -> None:
+        pulseira = Topicos.extrair_estado_posse(topico)
+        if pulseira is None:
+            return
+        self.visao.atualizar_posse(pulseira, mensagem.conteudo.get("coletor"))
 
     async def anunciar_online(self) -> None:
         """Publica a presença online (retida) no encerramento controlado."""
@@ -172,7 +172,7 @@ class Coordenador:
     async def _publicar_presenca(self, estado: EstadoPresenca) -> bool:
         """Publica a presença. Devolve False se o broker estiver indisponível, sem lançar erro."""
         try:
-            await self.broker.publicar(self.topicos[0], self.mensagem(estado))
+            await self.broker.publicar(Topicos.presenca_coordenador(), self.mensagem(estado))
             return True
         except BrokerIndisponivel as e:
             logging.warning(
@@ -197,7 +197,7 @@ class Coordenador:
         )
         config = mensagem.config_entrega
         return aiomqtt.Will(
-                topic=self.topicos[0],
+                topic=Topicos.presenca_coordenador(),
                 payload=mensagem.para_json(),
                 qos=config.qos,
                 retain=config.retida,

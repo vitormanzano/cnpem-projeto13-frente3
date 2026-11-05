@@ -41,7 +41,7 @@ class Coletor:
         pass
 
 
-    async def exeuctar(self) -> None:
+    async def executar(self) -> None:
         """Mantém a sessão com o broker e o sinal de vida."""
         tarefas = {
             asyncio.create_task(self.broker.manter_conexao()),
