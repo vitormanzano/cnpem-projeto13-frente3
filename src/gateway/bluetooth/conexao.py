@@ -4,6 +4,7 @@ import os
 from collections import deque
 import subprocess
 import re
+from _collections_abc import Callable
 
 from bleak import BleakClient
 from bleak.backends.service import BleakGATTServiceCollection
@@ -39,6 +40,7 @@ class ConexaoPulseira:
 
         self.endereco = endereco
         self.timeout_conexao = timeout_conexao
+        self.ao_ler: Callable[[LeituraRSSI], None] | None = None
         self._estado = EstadoConexao.DESCONECTADO
         self._client: BleakClient | None = None
         self._desconectado = asyncio.Event()
@@ -277,6 +279,8 @@ class ConexaoPulseira:
         while self.conectado:
             try:
                 leitura = await self.ler_rssi()
+                if self.ao_ler:
+                    self.ao_ler(leitura)
                 logging.info(
                     f"Estado: {leitura.estado.value} | Pulseira {self.endereco} |"
                     f"RSSI {leitura.rssi} dbm às {leitura.timestamp:%H:%M:%S.%f}"
