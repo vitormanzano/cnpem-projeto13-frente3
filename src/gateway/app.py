@@ -27,8 +27,17 @@ async def rodar_coletor() -> None:
     await coletor.executar()
 
 
+async def rodar_coordenador() -> None:
+    cliente_id = os.getenv("COORDENADOR_ID", "coordenador")
+    logging.info(f"Iniciando como coordenador | id {cliente_id}")
+    coordenador = Coordenador(ConexaoBroker(cliente_id=cliente_id))
+    await coordenador.assinar_topicos()
+    await coordenador.executar()
+
+
 PAPEIS: dict[str, Callable[[], Awaitable[None]]] = {
     "coletor": rodar_coletor,
+    "coordenador": rodar_coordenador,
 }
 
 

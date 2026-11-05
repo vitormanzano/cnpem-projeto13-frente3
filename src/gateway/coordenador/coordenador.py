@@ -203,3 +203,21 @@ class Coordenador:
                 retain=config.retida,
         )
 
+
+    async def executar(self) -> None:
+        """Inicia o coordenador."""
+        tarefas = {
+            asyncio.create_task(self.broker.manter_conexao()),
+            asyncio.create_task(self.manter_sinal_de_vida()),
+        }
+        try:
+            concluidas, _ = await asyncio.wait(tarefas, return_when=asyncio.FIRST_EXCEPTION)
+            for tarefa in concluidas:
+                tarefa.result()
+        finally: 
+            await self.anunciar_offline()
+            for tarefa in tarefas:
+                tarefa.cancel()
+            await asyncio.gather(*tarefas, return_exceptions=True)
+
+

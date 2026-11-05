@@ -22,7 +22,7 @@ from bluetooth.domain.erros import (
 )
 from bluetooth.domain.models import EstadoConexao, LeituraFrequenciaCardiaca, LeituraRSSI
 from bluetooth.reconexao import manter_conexao
-from bluetooth.scanner import find_target_device
+from bluetooth.scanner import VarreduraPulseira, find_target_device
 from coletor.coletor import identificador_coletor
 from mqtt.conexao import ConexaoBroker
 from mqtt.domain.models import CONFIG_POR_TIPO, VERSAO_FORMATO, EstadoPresenca, Mensagem, TipoMensagem
@@ -80,6 +80,17 @@ async def _aguardar_primeira_conexao(conexao: ConexaoPulseira, laco: asyncio.Tas
     await _aguardar(lambda: conexao.conectado or laco.done(), timeout=conexao.timeout_conexao + 5)
     if laco.done():
         await laco
+
+
+async def _primeira_leitura(endereco: str, timeout: float = 10) -> LeituraRSSI | None:
+    """Roda a varrudera até a primeira leitura: desconectado (achou) ou nao-encontrado."""
+    leituras: list[LeituraRSSI] = []
+    varredura = VarreduraPulseira(endereco, tempo_ausencia=timeout)
+    varredura.ao_ler = leituras.append
+    tarefa = asyncio.create_task(varredura.executar())
+    await _aguardar(lambda: bool(leituras), timeout=timeout + varredura.intervalo + 1)
+    await _encerrar(tarefa)
+    return leituras[0] if leituras else None
 
 
 async def _tentar_assinar_fc(conexao: ConexaoPulseira) -> bool:
@@ -226,8 +237,9 @@ async def teste_rf08(esperar_queda: bool = False) -> None:
     Cada mudança deve aparecer no log com horário, estado anterior, estado novo e motivo.
     """
     try:
-        await find_target_device(ENDERECO_INEXISTENTE, timeout=5)
-        _verificar("varredura sem a pulseira: nao-encontrado", False)
+        leitura = await _primeira_leitura(ENDERECO_INEXISTENTE, timeout=5)
+        _verificar("varredura sem a pulseira: nao-encontrado", 
+                   leitura is not None and leitura.estado is EstadoConexao.NAO_ENCONTRADO)
     except PulseiraNaoEncontrada:
         _verificar("varredura sem a pulseira: nao-encontrado", True)
 
@@ -277,8 +289,9 @@ async def teste_rf10(conectada_por: float = 10) -> None:
 
     await asyncio.sleep(2)  # tempo para a pulseira voltar a anunciar
     try:
-        await find_target_device(endereco)
-        _verificar("pulseira voltou a aparecer na varredura", True)
+        leitura = await _primeira_leitura(endereco)
+        _verificar("pulseira voltou a aparecer na varredura", 
+                   leitura is not None and leitura.estado is EstadoConexao.NAO_ENCONTRADO)
     except PulseiraNaoEncontrada:
         _verificar("pulseira voltou a aparecer na varredura", False)
 
