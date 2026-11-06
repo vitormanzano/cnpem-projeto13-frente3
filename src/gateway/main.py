@@ -441,7 +441,6 @@ async def teste_rf15() -> None:
     tabela = {  # tipo: (QoS, retida), conforme a tabela do RF15
         TipoMensagem.PRESENCA:            (1, True),
         TipoMensagem.ESTADO_PULSEIRA:     (0, False),
-        TipoMensagem.SOLICITACAO_POSSE:   (1, False),
         TipoMensagem.LIBERACAO_POSSE:     (1, False),
         TipoMensagem.FREQUENCIA_CARDIACA: (0, False),
         TipoMensagem.POSSE:               (1, True),
@@ -472,7 +471,7 @@ async def teste_rf15() -> None:
     hierarquia = [
         (Topicos.presenca_coletor("c1"),      "coletores/c1/presenca"),
         (Topicos.estado_rssi("c1", "AA"),     "coletores/c1/pulseiras/AA"),
-        (Topicos.solicitacoes_posse("AA"),    "pulseiras/AA/solicitacoes"),
+        (Topicos.liberacao_posse("AA"),       "pulseiras/AA/liberacao"),
         (Topicos.frequencia_cardiaca("AA"),   "pulseiras/AA/frequencia-cardiaca"),
         (Topicos.estado_posse("AA"),          "pulseiras/AA/posse"),
         (Topicos.handoff("AA"),               "pulseiras/AA/handoff"),

@@ -30,16 +30,16 @@ class Topicos:
 
 
     @staticmethod
-    def solicitacoes_posse(pulseira: str) -> str:
-        """Coletor: Solicitação e liberação de posse"""
-        return f"pulseiras/{pulseira}/solicitacoes"
+    def liberacao_posse(pulseira: str) -> str:
+        """Coletor: Liberação da posse"""
+        return f"pulseiras/{pulseira}/liberacao"
 
 
     @staticmethod
-    def extrair_solicitacoes_posse(topico: str) -> str | None:
-        """Devolve a pulseira de pulseiras/{pulseira}/solicitacoes, ou None se o tópico for outro."""
+    def extrair_liberacao_posse(topico: str) -> str | None:
+        """Devolve a pulseira de pulseiras/{pulseira}/liberacao, ou None se o tópico for outro."""
         partes = topico.split("/")
-        if len(partes) == 3 and partes[0] == "pulseiras" and partes[2] == "solicitacoes":
+        if len(partes) == 3 and partes[0] == "pulseiras" and partes[2] == "liberacao":
             return partes[1]
         return None
 

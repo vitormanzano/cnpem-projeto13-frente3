@@ -9,7 +9,6 @@ VERSAO_FORMATO = 1
 class TipoMensagem(Enum):
     PRESENCA            = "presenca"
     ESTADO_PULSEIRA     = "estado-pulseira"
-    SOLICITACAO_POSSE   = "solicitacao-posse"
     LIBERACAO_POSSE     = "liberacao-posse"
     FREQUENCIA_CARDIACA = "frequencia-cardiaca"
     POSSE               = "posse"
@@ -26,7 +25,6 @@ class ConfigEntrega:
 CONFIG_POR_TIPO: dict[TipoMensagem, ConfigEntrega] = {
     TipoMensagem.PRESENCA:            ConfigEntrega(qos=1, retida=True),
     TipoMensagem.ESTADO_PULSEIRA:     ConfigEntrega(qos=0, retida=False),
-    TipoMensagem.SOLICITACAO_POSSE:   ConfigEntrega(qos=1, retida=False),
     TipoMensagem.LIBERACAO_POSSE:     ConfigEntrega(qos=1, retida=False),
     TipoMensagem.FREQUENCIA_CARDIACA: ConfigEntrega(qos=0, retida=False),
     TipoMensagem.POSSE:               ConfigEntrega(qos=1, retida=True),

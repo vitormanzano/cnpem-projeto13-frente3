@@ -84,7 +84,7 @@ class Coordenador:
         await self.broker.assinar(Topicos.presenca_coletor("+"))
         await self.broker.assinar(Topicos.estado_rssi("+", "+"), qos=0)
         await self.broker.assinar(Topicos.estado_posse("+"))
-        await self.broker.assinar(Topicos.solicitacoes_posse("+"))
+        await self.broker.assinar(Topicos.liberacao_posse("+"))
 
     
     async def ao_receber(self, topico: str, mensagem: Mensagem) -> None:
@@ -146,7 +146,7 @@ class Coordenador:
 
     
     async def _tratar_liberacao(self, topico: str, mensagem: Mensagem) -> None:
-        pulseira = Topicos.extrair_solicitacoes_posse(topico)
+        pulseira = Topicos.extrair_liberacao_posse(topico)
         if pulseira is None:
             return
         if mensagem.origem != self.visao.posse.get(pulseira):
@@ -259,6 +259,13 @@ class Coordenador:
 
             if await self._publicar_presenca(EstadoPresenca.ONLINE):
                 logging.debug(f"Sinal de vida | Coordenador")
+
+
+    async def registrar_visao(self) -> None:
+        """Loga em DEBUG, a cada 10 s, como o coordenador enxerga a rede."""
+        while not self._encerrada:
+            await asyncio.sleep(10)
+            logging.debug("%s", self.visao)
 
 
     async def _publicar_presenca(self, estado: EstadoPresenca) -> bool:
@@ -377,10 +384,10 @@ class Coordenador:
 
     async def executar(self) -> None:
         """Inicia o coordenador."""
-        logging.debug("%s", self.visao)
         tarefas = {
             asyncio.create_task(self.broker.manter_conexao()),
             asyncio.create_task(self.manter_sinal_de_vida()),
+            asyncio.create_task(self.registrar_visao()),
         }
         try:
             concluidas, _ = await asyncio.wait(tarefas, return_when=asyncio.FIRST_EXCEPTION)

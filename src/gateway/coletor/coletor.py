@@ -97,9 +97,9 @@ class Coletor:
         if self._sessao is None:
             return
         try:
-            await self.conexao_desconectar()
+            await self.conexao.desconectar()
         except FalhaConexao as e:
-            logging.error(f"Pulseira: {self.endereco} | e")
+            logging.error(f"Pulseira: {self.endereco} | {e}")
         self._sessao.cancel()
         await asyncio.gather(self._sessao, return_exceptions=True)
         self._sessao = None
@@ -114,7 +114,7 @@ class Coletor:
                 }
         )
         try:
-            await self.broker.publicar(Topicos.solicitacoes_posse(self.endereco), mensagem)
+            await self.broker.publicar(Topicos.liberacao_posse(self.endereco), mensagem)
         except BrokerIndisponivel as e:
             logging.warning(f"Erro: {BrokerIndisponivel.codigo} | Pulseira: {self.endereco} | Liberação não publicada: {e}")
 
