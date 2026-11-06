@@ -2,6 +2,7 @@ x-gateway: &gateway
   build: .
   restart: unless-stopped
   env_file: .env
+  command: ["python", "src/gateway/app.py"] # O CMD do Dockerfile roda o main.py (roteiro de testes)
 
 services:
   hivemq:
