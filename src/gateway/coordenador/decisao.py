@@ -1,4 +1,4 @@
-from gateway.coordenador.visao import SinalColetor
+from coordenador.visao import SinalColetor
 
 MARGEM_HISTERESE_PADRAO = 5.0
 

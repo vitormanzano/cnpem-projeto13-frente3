@@ -1,20 +1,17 @@
 import asyncio
-import os
-from bleak import BleakClient
-from bleak.exc import BleakError
-import traceback
-from bleak import BleakScanner
 import logging
+import os
 import time
-
-from bluetooth.domain.erros import BluetoothIndisponivel, PulseiraNaoEncontrada
-from bluetooth.domain.models import DispositivoBLE, EstadoConexao, LeituraRSSI, Pulseira
-
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
+from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
+from bleak.exc import BleakError
+
+from bluetooth.domain.erros import BluetoothIndisponivel, PulseiraNaoEncontrada
+from bluetooth.domain.models import DispositivoBLE, EstadoConexao, LeituraRSSI, Pulseira
 
 
 SCAN_TIMEOUT_PADRAO = 10.0

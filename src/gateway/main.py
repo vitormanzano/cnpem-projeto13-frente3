@@ -4,17 +4,12 @@ import json
 import logging
 import os
 import socket
-import sys
 import time
 from collections.abc import Callable
 from dataclasses import fields
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from dotenv import load_dotenv
-
-# estado_rssi.py importa gateway.*: precisa de src/ no caminho (no Docker já vem do PYTHONPATH)
-sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from bluetooth.conexao import ConexaoPulseira
 from bluetooth.domain.erros import (

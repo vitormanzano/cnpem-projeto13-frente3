@@ -1,15 +1,14 @@
 import asyncio
 import logging
 import os
-from collections import deque
-import subprocess
 import re
-from _collections_abc import Callable
+from collections import deque
+from collections.abc import Callable
 
 from bleak import BleakClient
-from bleak.backends.service import BleakGATTServiceCollection
-from bleak.exc import BleakDeviceNotFoundError, BleakError
 from bleak.backends.characteristic import BleakGATTCharacteristic
+from bleak.exc import BleakDeviceNotFoundError, BleakError
+
 from bluetooth.domain.erros import BluetoothIndisponivel, FalhaConexao, RSSIIndisponivel
 from bluetooth.domain.models import EstadoConexao, LeituraFrequenciaCardiaca, LeituraRSSI, Servico
 
@@ -21,7 +20,7 @@ TIMEOUT_BTMGMT = 2.0
 
 CONNECT_TIMEOUT_PADRAO = 20.0
 
-CARACTERISTICA_FREQUENCIA_CARDIACA_UUID = "uuid"
+CARACTERISTICA_FREQUENCIA_CARDIACA_UUID = "00002a37-0000-1000-8000-00805f9b34fb" # Heart Rate Measurement (0x2A37)
 TAMANHO_MAXIMO_DE_LEITURAS_BUFFER = 10
 
 

@@ -1,7 +1,6 @@
 import asyncio
 import os
 import logging
-from typing import TYPE_CHECKING
 
 import aiomqtt
 from bluetooth.domain.erros import BrokerIndisponivel
@@ -11,13 +10,6 @@ from mqtt.domain.topicos import Topicos
 
 
 INTERVALO_SINAL_DE_VIDA_PADRAO = 5.0
-
-
-CARACTERISTICA_FREQUENCIA_CARDIACA_UUID = "00002a37-0000-1000-8000-00805f9b34fb"
-
-
-if TYPE_CHECKING:
-    from mqtt.conexao import ConexaoBroker
 
 
 def ler_intervalo_sinal_de_vida(intervalo: float | None = None) -> float:

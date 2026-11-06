@@ -3,11 +3,11 @@ import os
 import socket
 import logging
 
-from gateway.bluetooth.conexao import ConexaoPulseira
-from gateway.bluetooth.domain.erros import BluetoothIndisponivel, BrokerIndisponivel, FalhaConexao
-from gateway.bluetooth.reconexao import manter_conexao
-from gateway.bluetooth.scanner import VarreduraPulseira
-from gateway.mqtt.estado_rssi import EstadoRssiColetor
+from bluetooth.conexao import ConexaoPulseira
+from bluetooth.domain.erros import BluetoothIndisponivel, BrokerIndisponivel, FalhaConexao
+from bluetooth.reconexao import manter_conexao
+from bluetooth.scanner import VarreduraPulseira
+from mqtt.estado_rssi import EstadoRssiColetor
 from mqtt.domain.models import Mensagem, TipoMensagem
 from mqtt.domain.topicos import Topicos
 from mqtt.presenca import PresencaColetor

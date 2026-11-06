@@ -3,14 +3,9 @@ import contextlib
 import logging
 import os
 import signal
-import sys
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 
 from dotenv import load_dotenv
-
-# coordenador.py importa gateway.*: precisa de src/ no caminho (no Docker já vem do PYTHONPATH)
-sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from coletor.coletor import Coletor, identificador_coletor
 from coordenador.coordenador import Coordenador

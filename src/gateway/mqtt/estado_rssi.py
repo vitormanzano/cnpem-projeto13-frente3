@@ -3,10 +3,10 @@ import logging
 import os
 
 from bluetooth.domain.erros import BrokerIndisponivel
-from gateway.bluetooth.domain.models import LeituraRSSI
-from gateway.mqtt.conexao import ConexaoBroker
-from gateway.mqtt.domain.models import Mensagem, TipoMensagem
-from gateway.mqtt.domain.topicos import Topicos
+from bluetooth.domain.models import LeituraRSSI
+from mqtt.conexao import ConexaoBroker
+from mqtt.domain.models import Mensagem, TipoMensagem
+from mqtt.domain.topicos import Topicos
 
 
 TAMANHO_FILA_PADRAO = 100

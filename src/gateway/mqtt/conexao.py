@@ -2,7 +2,6 @@ import asyncio
 import inspect
 import logging
 import os
-import socket
 from collections.abc import Awaitable, Callable
 
 import aiomqtt

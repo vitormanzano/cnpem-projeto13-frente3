@@ -1,13 +1,12 @@
 import asyncio
 import os
 import logging
-from typing import TYPE_CHECKING
 
 import aiomqtt
 from bluetooth.domain.erros import BrokerIndisponivel
 from bluetooth.domain.models import EstadoConexao
-from gateway.coordenador.decisao import MARGEM_HISTERESE_PADRAO, escolher_coletor
-from gateway.coordenador.visao import SinalColetor, VisaoColetores
+from coordenador.decisao import MARGEM_HISTERESE_PADRAO, escolher_coletor
+from coordenador.visao import SinalColetor, VisaoColetores
 from mqtt.conexao import ConexaoBroker
 from mqtt.domain.models import EstadoPresenca, Mensagem, TipoMensagem
 from mqtt.domain.topicos import Topicos
@@ -19,10 +18,6 @@ JANELA_HANDOFF_PADRAO          = 3.0
 LIMIAR_CONEXAO_FRACA_PADRAO    = -78
 LEITURAS_FRACAS_PADRAO         = 3
 PRAZO_LIBERACAO_PADRAO         = 3.0 # s para a origem confirmar que soltou
-
-
-if TYPE_CHECKING:
-    from mqtt.conexao import ConexaoBroker
 
 
 def ler_intervalo_sinal_de_vida(intervalo: float | None = None) -> float:
