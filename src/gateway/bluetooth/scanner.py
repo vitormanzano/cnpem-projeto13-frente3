@@ -116,8 +116,8 @@ class VarreduraPulseira:
             if self._ultimo is None:
                 return # Sem leitura válida
             pulseira = Pulseira(pulseira.endereco, pulseira.nome, self._ultimo.rssi)
-            self._ultimo, self._visto_em = pulseira, time.monotonic()
-            
+        self._ultimo, self._visto_em = pulseira, time.monotonic()
+
 
 
     def _leitura(self) -> LeituraRSSI | None:
