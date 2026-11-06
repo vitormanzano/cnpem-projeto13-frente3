@@ -111,7 +111,7 @@ class VarreduraPulseira:
 
 
     def _ao_anuncio(self, pulseira: Pulseira) -> None:
-        self._visto_em = pulseira, time.monotonic()
+        self._visto_em = time.monotonic()
         if pulseira.rssi == CODIGO_RSSI_INDISPONIVEL:
             if self._ultimo is None:
                 return # Sem leitura válida
