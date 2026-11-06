@@ -242,7 +242,7 @@ class ConexaoPulseira:
         try: 
 
             processo = await asyncio.create_subprocess_exec(
-                "btmgmt", "--index", "0", "conn-info", "-t", "le_random", self.endereco,
+                "btmgmt", "--index", "0", "conn-info", "-t", "1", self.endereco,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
