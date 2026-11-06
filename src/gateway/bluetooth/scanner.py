@@ -22,6 +22,8 @@ INTERVALO_RSSI_PADRAO = 1.0
 TEMPO_AUSENCIA_PADRAO = 5.0
 INTERVALO_RETOMADA = 5.0
 
+CODIGO_RSSI_INDISPONIVEL=127
+
 NOME_PADRAO = "Desconhecido / Oculto"
 MENSAGEM_BLUETOOTH_DESLIGADO = (
     "Bluetooth desligado ou indisponível. Ative o Bluetooth do coletor e tente novamente."
@@ -109,7 +111,13 @@ class VarreduraPulseira:
 
 
     def _ao_anuncio(self, pulseira: Pulseira) -> None:
-        self._ultimo, self._visto_em = pulseira, time.monotonic()
+        self._visto_em = pulseira, time.monotonic()
+        if pulseira.rssi == CODIGO_RSSI_INDISPONIVEL:
+            if self._ultimo is None:
+                return # Sem leitura válida
+            pulseira = Pulseira(pulseira.endereco, pulseira.nome, pulseira.rssi)
+            self._ultimo = pulseira
+            
 
 
     def _leitura(self) -> LeituraRSSI | None:

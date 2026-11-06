@@ -29,6 +29,16 @@ class SinalColetor:
         return fmean(self.amostras) if self.amostras else None
 
 
+    def __str__(self) -> str:
+        rssi = "-" if self.rssi is None else f"{self.rssi} dBm"
+        media = "-" if self.rssi_suavizada is None else f"{self.rssi_suavizada:.1f} dBm"
+        idade = time.monotonic() - self.recebido_em
+        return (
+            f"{self.estado.value:<14} | rssi: {rssi:>8} | média: {media:>10} | "
+            f"há {idade:4.1f}s | amostras: {list(self.amostras)}"
+        )
+
+
 class VisaoColetores:
     """Estado da rede montado a partir das mensagens do broker: quem está online,
     quem enxerga cada pulseira (e com que sinal) e quem tem a posse."""
@@ -103,3 +113,35 @@ class VisaoColetores:
         """A disputa de um handoff só deve comparar leituras feitas depois da liberação."""
         for sinal in self.sinais.get(pulseira, {}).values():
             sinal.amostras.clear()
+
+
+    def __str__(self) -> str:
+        """Retrato da visão do coordenador, em várias linhas, para o log.
+
+        Legenda: `*` = coletor com a posse; `[offline]` = coletor fora de `coletores_online`;
+        `[expirado]` = leitura mais velha que `validade`. Sinais marcados não entram em disputa.
+        """
+        online = ", ".join(sorted(self.coletores_online)) or "nenhum"
+        linhas = [f"Visão dos coletores | online: [{online}] | janela: {self.tamanho_janela} | validade: {self.validade:g}s"]
+
+        pulseiras = sorted(self.sinais.keys() | self.posse.keys())
+        if not pulseiras:
+            linhas.append("  (nenhuma pulseira conhecida)")
+
+        agora = time.monotonic()
+        for pulseira in pulseiras:
+            dono = self.posse.get(pulseira)
+            linhas.append(f"  Pulseira {pulseira} | posse: {dono or 'ninguém'}")
+            sinais = self.sinais.get(pulseira, {})
+            if not sinais:
+                linhas.append("      (sem sinais)")
+            for coletor, sinal in sorted(sinais.items()):
+                marca = "*" if coletor == dono else " "
+                avisos = []
+                if coletor not in self.coletores_online:
+                    avisos.append("[offline]")
+                if agora - sinal.recebido_em > self.validade:
+                    avisos.append("[expirado]")
+                linhas.append(f"    {marca} {coletor:<20} {sinal} {' '.join(avisos)}".rstrip())
+
+        return "\n".join(linhas)

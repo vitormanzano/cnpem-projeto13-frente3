@@ -22,7 +22,7 @@ from bluetooth.domain.erros import (
 )
 from bluetooth.domain.models import EstadoConexao, LeituraFrequenciaCardiaca, LeituraRSSI
 from bluetooth.reconexao import manter_conexao
-from bluetooth.scanner import VarreduraPulseira, find_target_device
+from bluetooth.scanner import VarreduraPulseira, find_all_local_devices
 from coletor.coletor import identificador_coletor
 from mqtt.conexao import ConexaoBroker
 from mqtt.domain.models import CONFIG_POR_TIPO, VERSAO_FORMATO, EstadoPresenca, Mensagem, TipoMensagem
@@ -550,7 +550,9 @@ async def teste_rf09(duracao: float = 60) -> None:
 async def main() -> None:
     """Descomente UM teste por vez."""
     try:
-        await teste_rf15()                  # mensagens padronizadas: sem BLE e sem broker
+        devices = await find_all_local_devices()
+        print(devices)
+        # await teste_rf15()                  # mensagens padronizadas: sem BLE e sem broker
         # await teste_rf11()                # broker, sem BLE (manual=True para docker stop/start)
         # await teste_rf12()                # presença, sinal de vida e last will
         # await teste_rf03()                # conectar à pulseira

@@ -16,8 +16,16 @@ from coletor.coletor import Coletor, identificador_coletor
 from coordenador.coordenador import Coordenador
 from mqtt.conexao import ConexaoBroker
 
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+
+# Bibliotecas que ficam muito verbosas em DEBUG
+logging.getLogger("bleak").setLevel(logging.WARNING)
+logging.getLogger("aiomqtt").setLevel(logging.WARNING)
+
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 async def rodar_coletor() -> None:
     cliente_id = identificador_coletor()

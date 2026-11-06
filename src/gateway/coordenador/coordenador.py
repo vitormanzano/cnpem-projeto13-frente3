@@ -377,6 +377,7 @@ class Coordenador:
 
     async def executar(self) -> None:
         """Inicia o coordenador."""
+        logging.debug("%s", self.visao)
         tarefas = {
             asyncio.create_task(self.broker.manter_conexao()),
             asyncio.create_task(self.manter_sinal_de_vida()),
