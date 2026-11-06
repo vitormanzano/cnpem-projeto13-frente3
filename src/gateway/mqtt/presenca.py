@@ -13,6 +13,9 @@ from mqtt.domain.topicos import Topicos
 INTERVALO_SINAL_DE_VIDA_PADRAO = 5.0
 
 
+CARACTERISTICA_FREQUENCIA_CARDIACA_UUID = "00002a37-0000-1000-8000-00805f9b34fb"
+
+
 if TYPE_CHECKING:
     from mqtt.conexao import ConexaoBroker
 
@@ -56,7 +59,7 @@ class PresencaColetor:
         self._encerrada = False
 
         self.broker.ultima_vontade = self._ultima_vontade()
-        self.broker.adicionar_ao_conectar(self.anunciar_offline)
+        self.broker.adicionar_ao_conectar(self.anunciar_online)
 
     @property
     def topico(self) -> str:
@@ -78,7 +81,7 @@ class PresencaColetor:
         descarta a última vontade, então este é o único aviso de offline. Depois dele, 
         o sinal de vida para e as reconexões não anunciam mais online.
         """
-        self.encerrada = True
+        self._encerrada = True
         if await self._publicar(EstadoPresenca.OFFLINE):
             logging.info(f"Presença: {EstadoPresenca.OFFLINE.value} | Coletor: {self.broker.cliente_id} ")
 

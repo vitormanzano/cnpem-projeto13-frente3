@@ -286,7 +286,7 @@ class ConexaoPulseira:
                     f"RSSI {leitura.rssi} dbm às {leitura.timestamp:%H:%M:%S.%f}"
                 )
             except RSSIIndisponivel as e:
-                logging.error(f"Erro: {RSSIIndisponivel.codigo} | pulseira {self.endereco}: e")
+                logging.error(f"Erro: {RSSIIndisponivel.codigo} | pulseira {self.endereco}: {e}")
                 return
             await asyncio.sleep(intervalo)
 
