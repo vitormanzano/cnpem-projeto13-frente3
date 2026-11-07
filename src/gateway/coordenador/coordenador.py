@@ -86,7 +86,7 @@ class Coordenador:
         """Encaminha cada mensagem pelo tipo; o tópico só é usado para extrair os ids."""
         match mensagem.tipo:
             case TipoMensagem.PRESENCA:
-                self._tratar_presenca(topico, mensagem)
+                await self._tratar_presenca(topico, mensagem)
             case TipoMensagem.ESTADO_PULSEIRA:
                 await self._tratar_sinal(topico, mensagem)
             case TipoMensagem.POSSE:
@@ -95,7 +95,7 @@ class Coordenador:
                 await self._tratar_liberacao(topico, mensagem)
 
 
-    def _tratar_presenca(self, topico: str, mensagem: Mensagem) -> None:
+    async def _tratar_presenca(self, topico: str, mensagem: Mensagem) -> None:
         coletor = Topicos.extrair_presenca_coletor(topico)
         if coletor is None:
             return
@@ -105,6 +105,38 @@ class Coordenador:
         if self.visao.atualizar_presenca(coletor, online):
             estado = EstadoPresenca.ONLINE if online else EstadoPresenca.OFFLINE
             logging.info(f"Presença | Coletor: {coletor} | {estado.value}")
+
+        if not online:
+            fo rpulseira in self.visao.pulseiras_de(coletor):
+                await self._liberar_posse_orfa(pulseira, coletor)
+
+
+    async def _tratar_posse(self, topico: str, mensagem: Mensagem) -> None:
+        pulseira = Topicos.extrair_estado_posse(topico)
+        if pulseira is None:
+            return
+        dono = mensagem.conteudo.get("coletor")
+        self.visao.atualizar_posse(pulseira, dono)
+
+        # Posse retida em um coletor que já caiu (ex: coordenador reiniciou)
+        if dono is not None and dono in self.visao.coletores_offline:
+            await self._liberar_posse_orfa(pulseira, dono)
+
+
+    async def _liberar_posse_orfa(self, pulseira: str, coletor: str) -> None:
+        """Coletor responsável ficou indisponível, então a posse é liberada."""
+        if (liberada := self._liberacoes.get(pulseira)) is not None:
+            # A queda vale como liberação para o handoff
+            self.visao.limpar_amostras(pulseira)
+            liberada.set()
+            return
+
+        logging.info(f"Posse liberada | Pulseira: {pulseira} | Motivo: coletor {coletor} offline.")
+        self._leituras_fracas.pop(pulseira, None)
+        try:
+            await self._publicar_posse(pulseira, None)
+        except BrokerIndisponivel as e:
+            logging.warning(f"Erro: {BrokerIndisponivel.codigo} | Pulseira: {pulseira} | Posse não liberada: {e}")
 
 
     async def _tratar_sinal(self, topico: str, mensagem: Mensagem) -> None:
