@@ -90,7 +90,7 @@ class Coordenador:
             case TipoMensagem.ESTADO_PULSEIRA:
                 await self._tratar_sinal(topico, mensagem)
             case TipoMensagem.POSSE:
-                self._tratar_posse(topico, mensagem)
+                await self._tratar_posse(topico, mensagem)
             case TipoMensagem.LIBERACAO_POSSE:
                 await self._tratar_liberacao(topico, mensagem)
 

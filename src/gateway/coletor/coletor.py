@@ -61,16 +61,21 @@ class Coletor:
 
 
     async def _tratar_posse(self, dono: str | None) -> None:
+        """Posse minha: conecta. Liberada: começa a varrer. Com outro coletor: para de varrer"""
         if dono == self.broker.cliente_id:
             if self._sessao is None or self._sessao.done():
                 logging.info(f"Posse recebida | Pulseira: {self.endereco}")
                 await self._parar_varredura()
                 self._sessao = asyncio.create_task(self._manter_sessao())
-        elif self._sessao is not None:
+            return
+        if self._sessao is not None:
             logging.warning(f"Posse perdida sem handoff | Pulseira: {self.endereco} | Dono: {dono}")
             await self._desconectar()
-            self._iniciar_varredura()
                     
+        if dono is None:
+            self._iniciar_varredura() # Posse liberada
+        else:
+            await self._parar_varredura() # Conectada a outro coletor
 
     async def _manter_sessao(self) -> None:
         """Roda em tarefa própria: conectar pode levar até CONNECT_TIMEOUT e não pode travar o MQTT."""
@@ -132,8 +137,8 @@ class Coletor:
 
 
     async def executar(self) -> None:
-        self._iniciar_varredura()
         """Mantém a sessão com o broker e o sinal de vida."""
+        self._iniciar_varredura() # Sem posse retida
         tarefas = {
             asyncio.create_task(self.broker.manter_conexao()),
             asyncio.create_task(self.presenca.manter_sinal_de_vida()),
