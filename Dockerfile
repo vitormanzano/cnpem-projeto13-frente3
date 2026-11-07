@@ -3,7 +3,7 @@ FROM python:3.11-slim
 # Evita geração de bytecode .pyc e garante logs em tempo real sem buffer
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app/src:/app/src/gateway
+    PYTHONPATH=/app/src/gateway
 
 # Pacotes necessários para comunicação Bluetooth (BlueZ e D-Bus) no Linux
 RUN apt-get update && apt-get install -y --no-install-recommends \

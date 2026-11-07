@@ -1,150 +1,155 @@
 import asyncio
-from bleak import BleakClient
-from bleak.exc import BleakError
-import traceback
+import logging
+import os
+import time
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+
 from bleak import BleakScanner
+from bleak.backends.device import BLEDevice
+from bleak.backends.scanner import AdvertisementData
+from bleak.exc import BleakError
 
-TARGET_ADDRESS="84B49860-9C1B-D2AC-9ABD-3074E2B20F9F"
+from bluetooth.domain.erros import BluetoothIndisponivel, PulseiraNaoEncontrada
+from bluetooth.domain.models import DispositivoBLE, EstadoConexao, LeituraRSSI, Pulseira
 
 
-"""O RSSI deve ficar entre -55 e --78, ou seja, -78 < RSSI < -55"""
-async def find_target_address(target_address=TARGET_ADDRESS):
-    """Procura um dispositivo Bluetooth BLE pelo endereço (MAC ou UUID).
+SCAN_TIMEOUT_PADRAO = 10.0
+INTERVALO_RSSI_PADRAO = 1.0
+TEMPO_AUSENCIA_PADRAO = 5.0
+INTERVALO_RETOMADA = 5.0
 
-    Realiza uma varredura nos dispositivos próximos. Caso encontre um
-    dispositivo com endereço correspondente ao `target_address`,
-    retorna o objeto `BLEDevice`.
+CODIGO_RSSI_INDISPONIVEL=127
+
+NOME_PADRAO = "Desconhecido / Oculto"
+MENSAGEM_BLUETOOTH_DESLIGADO = (
+    "Bluetooth desligado ou indisponível. Ative o Bluetooth do coletor e tente novamente."
+)
+
+async def find_all_local_devices(timeout: float | None = None) -> list[DispositivoBLE]:
+    """Lista os dispositivos BLE anunciando ao alcance do coletor (RF01).
+
+    Cada dispositivo aparece uma única vez (o Bleak agrupa por endereço),
+    com o RSSI do anúncio mais recente.
 
     Args:
-        target_address (str): Endereço MAC (Linux/Windows) ou UUID (macOS) do dispositivo alvo.
+        timeout (float): Duração da varredura em segundos.
 
     Returns:
-        BLEDevice | None: Objeto do dispositivo se encontrado; caso contrário, None.
+        list[DispositivoBLE]: Dispositivos ordenados do sinal mais forte para o mais fraco.
+            Lista vazia caso nenhum seja encontrado.
+
+    Raises:
+        BluetoothIndisponivel: Se o Bluetooth estiver desligado ou inacessível.
     """
-    devices = await BleakScanner.discover(
-        # return_adv=True,
-    )
+    if timeout is None:
+        timeout = float(os.getenv("SCAN_TIMEOUT", SCAN_TIMEOUT_PADRAO))
 
-    for device in devices:
-        if device.address == target_address:
-            print("ACHOU")
-            return device
+    logging.info(f"Iniciando varredura BLE por {timeout:g}s")
 
-    return None
+    try:
+        devices_dict = await BleakScanner.discover(return_adv=True, timeout=timeout)
+    except (BleakError, OSError) as e:
+        logging.error(f"Falha ao iniciar varredura BLE [{type(e).__name__}]: {e}")
+        raise BluetoothIndisponivel(str(e)) from e
 
+    dispositivos = [
+        DispositivoBLE(
+            endereco=address,
+            nome=adv_data.local_name or dev.name or NOME_PADRAO,
+            rssi=adv_data.rssi,
+        )
+        for address, (dev, adv_data) in devices_dict.items()
+    ]
+    dispositivos.sort(key=lambda d: d.rssi, reverse=True)
 
-async def find_all_local_devices():
-    devices_dict = await BleakScanner.discover(return_adv=True, timeout=5.0)
-
-    if not devices_dict:
-        print("Nenhum dispositivo BLE encontrado ao alcance.")
-        return
-
-    for address, (dev, adv_data) in devices_dict.items():
-        nome = dev.name or adv_data.local_name or "Desconhecido / Oculto"
-        rssi = adv_data.rssi  
-        print(f"Endereço: {address} | Nome: {nome:<25} | RSSI: {rssi} dBm")
-
-    return devices_dict
+    logging.info(f"Varredura concluída: {len(dispositivos)} dispositivo(s) encontrado(s)")
+    return dispositivos
 
 
-async def find_by_alternative_criteria(target_name="Polar Verity", target_service_uuid=None):
-    # Retorna o dispositivo e os dados do pacote de advertisement
-    devices_dict = await BleakScanner.discover(return_adv=True)
+
+@asynccontextmanager
+async def varrer_pulseira(endereco: str, ao_anuncio: Callable[[Pulseira], None]) -> AsyncIterator[None]:
+    """Mantém o scanner ligado enquanto o bloco `async with` roda, chamando `ao_anuncio` a cada anúncio da pulseira.
     
-    for address, (device, adv_data) in devices_dict.items():
-        # Filtro por Nome local ou Nome anunciado
-        if adv_data.local_name == target_name or device.name == target_name:
-            print(f"Dispositivo encontrado por Nome! Endereço atual: {address}")
-            return device
-            
-        # Filtro por UUID de serviço (caso o nome esteja oculto)
-        if target_service_uuid and target_service_uuid in adv_data.service_uuids:
-            print(f"Dispositivo encontrado por Serviço GATT! Endereço atual: {address}")
-            return device
+    Raises:
+        BluetoothIndisponviel: Se o scanner não puder ser ligado
+    """
+    def ao_detectar(dev: BLEDevice, adv: AdvertisementData) -> None:
+        if dev.address.upper() == endereco.upper():
+            ao_anuncio(Pulseira(endereco=dev.address, nome=adv.local_name or dev.name or NOME_PADRAO, rssi=adv.rssi))
 
-    print("Dispositivo não encontrado pelos critérios alternativos.")
-    return None
-
-
-async def testar_invisibilidade_em_conexao():
-    print(f"Conectando a {TARGET_ADDRESS}...")
-    async with BleakClient(TARGET_ADDRESS) as client:
-        if client.is_connected:
-            print("Conexão estabelecida com sucesso!")
-            print(">>> Mantenha esta janela aberta e faça um scan no nRF Connect do celular agora. <<<")
-            # Mantém a conexão ativa por 30 segundos para permitir o teste no smartphone
-            await asyncio.sleep(30)
-    print("Conexão encerrada.")
-
-
-async def connect_device(target_address=TARGET_ADDRESS):
-    print(f"Procurando dispositivo {target_address}...")
-    device = await find_target_address(target_address)
-
-    if device is None:
-        print("Dispositivo não encontrado no scan inicial. Verifique se ele está ligado e anunciando.")
-        return
-
-    print(f"Dispositivo encontrado ({device.name or 'Sem Nome'}). Tentando conectar...")
-
+    scanner = BleakScanner(detection_callback=ao_detectar)
     try:
-        # Passa o objeto 'device' diretamente para evitar que o Bleak faça um novo scan
-        async with BleakClient(device, timeout=15.0) as client:
-            print("Conectado com sucesso!", client.is_connected)
-
-            while client.is_connected:
-                await get_current_rssi(client)
-
-    except BleakError as e:
-        # Exibe a classe exata da exceção Bleak e seu valor interno
-        print(f"Falha de conexão Bleak [{type(e).__name__}]: {repr(e)}")
-
-    except Exception as e:
-        # Exibe o tipo de erro genérico e imprime o rastreamento completo no terminal
-        print(f"\n[ERRO Capturado] Tipo: {type(e).__name__}")
-        print(f"Detalhes do erro: {repr(e)}")
-        print("\n--- Rastreamento Completo da Falha (Stack Trace) ---")
-        traceback.print_exc()
-
-async def get_current_rssi(client, seconds_interval: float = 1.0):
-    rssi = await client.get_rssi()
-    print(f"RSSI Atual: {rssi} dBm")
-
-    await asyncio.sleep(seconds_interval)
-
-
-async def connect_and_monitor_rssi(address: str = TARGET_ADDRESS):
-    print(f"Buscando dispositivo ativo no macOS: {address}...")
-
-    # Localiza o dispositivo em tempo real sem usar objetos em cache
-    device = await BleakScanner.find_device_by_address(address, timeout=10.0)
-
-    if device is None:
-        print("❌ Dispositivo não localizado no scan. Certifique-se de que ele está ligado e anunciando.")
-        return
-
-    print(f"✅ Dispositivo encontrado ({device.name or 'Sem Nome'}). Tentando conectar...")
-
+        await scanner.start()
+    except (BleakError, OSError) as e:
+        logging.error(f"{MENSAGEM_BLUETOOTH_DESLIGADO} [{type(e).__name__}]: {e}")
+        raise BluetoothIndisponivel(MENSAGEM_BLUETOOTH_DESLIGADO) from e
     try:
-        # Aumente o timeout para 20.0s para dar tempo ao CoreBluetooth do macOS
-        async with BleakClient(device, timeout=20.0) as client:
-            print(f"🔗 Conectado com sucesso! Status: {client.is_connected}")
+        yield
+    finally:
+        try:
+            await scanner.stop()
+        except (BleakError, OSError) as e:
+            logging.warning(f"Falha ao parar a varredura [{type(e).__name__}]: {e}")
 
-            while client.is_connected:
-                rssi = await client.get_rssi()
-                print(f"📡 RSSI Atual: {rssi} dBm")
-                await asyncio.sleep(1.0)
 
-    except asyncio.TimeoutError:
-        print("\n❌ [TimeoutError] A pilha CoreBluetooth do macOS não respondeu a tempo.")
-        print("Verificações recomendadas:")
-        print(" 1. Desconecte o dispositivo do Bluetooth do celular ou de outros apps.")
-        print(" 2. Remova o dispositivo do menu 'Ajustes do Sistema > Bluetooth' do macOS (se estiver pareado).")
-        print(" 3. Verifique as permissões de privacidade do Terminal/IDE no macOS.")
+class VarreduraPulseira:
+    """Escuta os anúncios da pulseira sem se conectar e entrega uma leitura a cada `intervalo`."""
 
-    except BleakError as e:
-        print(f"❌ Erro da biblioteca Bleak: {e}")
-    except Exception as e:
-        print(f"❌ Erro inesperado [{type(e).__name__}]: {e}")
-        traceback.print_exc()
+    def __init__(self, endereco: str, intervalo: float | None = None, tempo_ausencia: float | None = None) -> None:
+        self.endereco = endereco
+        self.ao_ler: Callable[[LeituraRSSI], None] | None = None
+        self.intervalo = intervalo or float(os.getenv("RSSI_INTERVALO", INTERVALO_RSSI_PADRAO))
+        self.tempo_ausencia = tempo_ausencia or float(os.getenv("VARREDURA_TEMPO_AUSENCIA", TEMPO_AUSENCIA_PADRAO))
+        self._ultimo: Pulseira | None = None
+        self._visto_em = 0.0
+        self._estado: EstadoConexao | None = None
+
+
+    def _ao_anuncio(self, pulseira: Pulseira) -> None:
+        "Guarda o último anúncio. Se vier sem RSSI, mantém o último válido."
+        if pulseira.rssi == CODIGO_RSSI_INDISPONIVEL:
+            if self._ultimo is None:
+                return # Sem leitura válida
+            pulseira = Pulseira(pulseira.endereco, pulseira.nome, self._ultimo.rssi)
+        self._ultimo, self._visto_em = pulseira, time.monotonic()
+
+
+
+    def _leitura(self) -> LeituraRSSI | None:
+        if time.monotonic() - self._visto_em > self.tempo_ausencia: 
+            return LeituraRSSI(self.endereco, EstadoConexao.NAO_ENCONTRADO) 
+        if self._ultimo is None:
+            return None # dentro do prazo do primeiro anúncio
+        return LeituraRSSI(self.endereco, EstadoConexao.DESCONECTADO, self._ultimo.rssi)
+
+
+    def _registrar_mudanca(self, leitura: LeituraRSSI) -> None:
+        """Loga só quando a pulseira aparece ou some, não a cada segundo."""
+        if leitura.estado is self._estado:
+            return
+        self._estado = leitura.estado
+        if leitura.estado is EstadoConexao.NAO_ENCONTRADO:
+            logging.warning(
+                f"Estado: {leitura.estado.value} | Erro: {PulseiraNaoEncontrada.codigo} | "
+                f"Pulseira {self.endereco} sem anúncios há {self.tempo_ausencia} s"
+            )
+        else:
+            logging.info(f"Pulseira encontrada: {self.endereco} | {self._ultimo.nome} | {leitura.rssi} dBm.")
+
+
+    async def executar(self) -> None:
+        """Varre até a tarefa ser cancelada; se o Bluetooth cair, tenta de novo."""
+        while True:
+            self._ultimo, self._visto_em = None, time.monotonic()
+            try:
+                async with varrer_pulseira(self.endereco, self._ao_anuncio):
+                    while True:
+                        await asyncio.sleep(self.intervalo)
+                        if leitura:= self._leitura():
+                            self._registrar_mudanca(leitura)
+                            if self.ao_ler:
+                                self.ao_ler(leitura)
+            except BluetoothIndisponivel:
+                await asyncio.sleep(INTERVALO_RETOMADA)

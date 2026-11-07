@@ -186,6 +186,8 @@ O aplicativo aceita customizações via variáveis de ambiente, facilitando a tr
 | `TARGET_ADDRESS` | `F1142908-CB92-...` | Endereço MAC (Linux) ou UUID (macOS) do sensor alvo |
 | `TARGET_NAME` | `Polar Verity` | Nome local anunciado pelo dispositivo no advertising BLE |
 | `TARGET_SERVICE_UUID`| `F1142908-CB92-...` | UUID do serviço GATT anunciado para validação de filtro |
+| `RECONEXAO_MAX_TENTATIVAS` | `5` | Máximo de tentativas de reconexão após uma queda inesperada da pulseira (RF05) |
+| `RECONEXAO_INTERVALO` | `3` | Segundos de espera entre as tentativas de reconexão (RF05) |
 | `PYTHONUNBUFFERED` | `1` | Garante envio imediato de logs para o terminal/container |
 
 Exemplo de uso via linha de comando:
