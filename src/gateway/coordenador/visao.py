@@ -15,18 +15,27 @@ class SinalColetor:
     """O que o coordenador sabe do sinal de um coletor para uma pulseira"""
     estado: EstadoConexao
     recebido_em: float
-    amostras: deque[int]
+    amostras: deque[tuple[int, int]] # (Mediana, quantidade de anúncios)
 
 
     @property
     def rssi(self) -> int | None:
         """Último RSSI recebido."""
-        return self.amostras[-1] if self.amostras else None
+        return self.amostras[-1][0] if self.amostras else None
 
 
     @property
     def rssi_suavizada(self) -> float | None:
-        return fmean(self.amostras) if self.amostras else None
+        """Média das medianas, ponderada pela qunatidade de anúncios de cada uma."""
+        if not self.amostras:
+            return None
+        medianas, quantidade = zip(*self.amostras)
+        return fmean(medianas, weights=quantidade)
+
+     
+    @property
+    def total_amostras(self) -> int:
+        return sum(n for _, n in self.amostras)
 
 
     def __str__(self) -> str:
@@ -73,7 +82,7 @@ class VisaoColetores:
         return mudou
 
 
-    def registrar_sinal(self, pulseira: str, coletor: str, estado: EstadoConexao, rssi: int | None) -> SinalColetor:
+    def registrar_sinal(self, pulseira: str, coletor: str, estado: EstadoConexao, rssi: int | None, amostras: int = 1) -> SinalColetor:
         agora = time.monotonic()
         sinais = self.sinais.setdefault(pulseira, {})
         sinal = sinais.get(coletor)
@@ -87,7 +96,7 @@ class VisaoColetores:
             """Significa nao-encontrado, as amostras anteriores não representam mais o sinal"""
             sinal.amostras.clear()
         else:
-            sinal.amostras.append(rssi)
+            sinal.amostras.append((rssi, amostras))
         return sinal
 
 

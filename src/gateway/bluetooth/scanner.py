@@ -4,6 +4,7 @@ import os
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from statistics import median
 
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
@@ -14,14 +15,14 @@ from bluetooth.domain.erros import BluetoothIndisponivel, PulseiraNaoEncontrada
 from bluetooth.domain.models import DispositivoBLE, EstadoConexao, LeituraRSSI, Pulseira
 
 
-SCAN_TIMEOUT_PADRAO = 10.0
-INTERVALO_RSSI_PADRAO = 1.0
-TEMPO_AUSENCIA_PADRAO = 5.0
-INTERVALO_RETOMADA = 5.0
+SCAN_TIMEOUT_PADRAO          = 10.0
+INTERVALO_RSSI_PADRAO        = 1.0
+TEMPO_AUSENCIA_PADRAO        = 5.0
+INTERVALO_RETOMADA           = 5.0
 
-CODIGO_RSSI_INDISPONIVEL=127
+CODIGO_RSSI_INDISPONIVEL     = 127
 
-NOME_PADRAO = "Desconhecido / Oculto"
+NOME_PADRAO                  = "Desconhecido / Oculto"
 MENSAGEM_BLUETOOTH_DESLIGADO = (
     "Bluetooth desligado ou indisponível. Ative o Bluetooth do coletor e tente novamente."
 )
@@ -103,26 +104,27 @@ class VarreduraPulseira:
         self.intervalo = intervalo or float(os.getenv("RSSI_INTERVALO", INTERVALO_RSSI_PADRAO))
         self.tempo_ausencia = tempo_ausencia or float(os.getenv("VARREDURA_TEMPO_AUSENCIA", TEMPO_AUSENCIA_PADRAO))
         self._ultimo: Pulseira | None = None
+        self._rssis: list[int] = [] # RSSI de cada anúncio no intervalo atual
+        self._nome: str | None = None
         self._visto_em = 0.0
         self._estado: EstadoConexao | None = None
 
 
     def _ao_anuncio(self, pulseira: Pulseira) -> None:
-        "Guarda o último anúncio. Se vier sem RSSI, mantém o último válido."
-        if pulseira.rssi == CODIGO_RSSI_INDISPONIVEL:
-            if self._ultimo is None:
-                return # Sem leitura válida
-            pulseira = Pulseira(pulseira.endereco, pulseira.nome, self._ultimo.rssi)
-        self._ultimo, self._visto_em = pulseira, time.monotonic()
+        """Acumula o RSSI de cada anúncio. Anúncio sem RSSI supõe que a pulseira está ao alcance, mas fica fora da mediana."""
+        self._visto_em, self._nome = time.monotonic(), pulseira.nome
+        if pulseira.rssi != CODIGO_RSSI_INDISPONIVEL:
+            self._rssis.append(pulseira.rssi)
 
 
 
     def _leitura(self) -> LeituraRSSI | None:
+        rssis, self._rssis = self._rssis, [] # Fecha o intervalo, e o próximo começa vazio
         if time.monotonic() - self._visto_em > self.tempo_ausencia: 
             return LeituraRSSI(self.endereco, EstadoConexao.NAO_ENCONTRADO) 
-        if self._ultimo is None:
-            return None # dentro do prazo do primeiro anúncio
-        return LeituraRSSI(self.endereco, EstadoConexao.DESCONECTADO, self._ultimo.rssi)
+        if not rssis:
+            return None # Nenhum RSSI válido nesse intervalo, não publica
+        return LeituraRSSI(self.endereco, EstadoConexao.DESCONECTADO, rssi=round(median(rssis)), amostras=len(rssis))
 
 
     def _registrar_mudanca(self, leitura: LeituraRSSI) -> None:
@@ -136,13 +138,13 @@ class VarreduraPulseira:
                 f"Pulseira {self.endereco} sem anúncios há {self.tempo_ausencia} s"
             )
         else:
-            logging.info(f"Pulseira encontrada: {self.endereco} | {self._ultimo.nome} | {leitura.rssi} dBm.")
+            logging.info(f"Pulseira encontrada: {self.endereco} | {self._nome} | {leitura.rssi} dBm.")
 
 
     async def executar(self) -> None:
         """Varre até a tarefa ser cancelada; se o Bluetooth cair, tenta de novo."""
         while True:
-            self._ultimo, self._visto_em = None, time.monotonic()
+            self._rssis, self._visto_em = [], time.monotonic()
             try:
                 async with varrer_pulseira(self.endereco, self._ao_anuncio):
                     while True:

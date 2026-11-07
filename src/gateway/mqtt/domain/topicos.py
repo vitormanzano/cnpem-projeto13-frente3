@@ -67,7 +67,7 @@ class Topicos:
 
     @staticmethod
     def handoff(pulseira: str) -> str:
-        """Coordenador: Comando de handoff com origem e destino"""
+        """Coordenador: Comando de handoff para a origem liberar a pulseira."""
         return f"pulseiras/{pulseira}/handoff"
 
     @staticmethod

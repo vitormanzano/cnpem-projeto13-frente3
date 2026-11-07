@@ -64,6 +64,7 @@ class EstadoRssiColetor:
                 "pulseira": leitura.endereco,
                 "estado": leitura.estado.value,
                 "rssi": leitura.rssi,
+                "amostras": leitura.amostras
             },
         )
 

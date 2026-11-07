@@ -29,6 +29,7 @@ class LeituraRSSI:
     endereco: str
     estado: EstadoConexao
     rssi: int | None = None
+    amostras: int | None = None # Anúncios que compõem o RSSI
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
