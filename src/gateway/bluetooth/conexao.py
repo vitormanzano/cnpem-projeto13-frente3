@@ -23,11 +23,14 @@ CONNECT_TIMEOUT_PADRAO = 20.0
 CARACTERISTICA_FREQUENCIA_CARDIACA_UUID = "00002a37-0000-1000-8000-00805f9b34fb" # Heart Rate Measurement (0x2A37)
 TAMANHO_MAXIMO_DE_LEITURAS_BUFFER = 10
 
+TratadorLeitura = Callable[[LeituraRSSI], None]
+
 
 class ConexaoPulseira:
     """Conexão GATT com a pulseira, mantida enquanto o coletor for o responsável por ela."""
 
-    def __init__(self, endereco: str, timeout_conexao: float | None = None) -> None:
+    def __init__(self, endereco: str, timeout_conexao: float | None = None, 
+                 ao_atualizar: TratadorLeitura | None = None) -> None:
         """
         Args:
             endereco (str): Endereço MAC (Linux) ou UUID (macOS) da pulseira.
@@ -50,6 +53,7 @@ class ConexaoPulseira:
         self._leituras_rssi: deque[LeituraRSSI]  = deque(
             maxlen = TAMANHO_MAXIMO_DE_LEITURAS_BUFFER
         )
+        self.ao_atualizar = ao_atualizar
 
 
     @property
@@ -262,6 +266,8 @@ class ConexaoPulseira:
 
         leitura = LeituraRSSI(self.endereco, EstadoConexao.CONECTADO, int(correspondencia.group(1)))
         self._leituras_rssi.append(leitura)
+
+        self._notificar(leitura)
         return leitura
 
 
@@ -300,4 +306,16 @@ class ConexaoPulseira:
                 f"Estado: {anterior.value} -> {novo.value} | Pulseira: {self.endereco}"
                 + (f" | {motivo}" if motivo else "")
         )
+
+        self._notificar(LeituraRSSI(self.endereco, novo))
+
+
+    def _notificar(self, leitura: LeituraRSSI) -> None:
+        if self.ao_atualizar is None:
+            return
+        try:
+            self.ao_atualizar(leitura)
+        except Exception as e:
+            """Uma falha na publicação não pode derrubar a conexão BLE"""
+            logging.exception(f"Erro ao notificar leitura da pulseira {self.endereco} [{type(e).__name__}]: {e}")
 

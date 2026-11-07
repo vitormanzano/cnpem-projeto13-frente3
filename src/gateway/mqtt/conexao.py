@@ -62,7 +62,6 @@ class ConexaoBroker:
         self._client: aiomqtt.Client | None = None
         self._assinaturas: dict[str, int] = {}
 
-
     @property
     def conectado(self) -> bool:
         return self._client is not None
