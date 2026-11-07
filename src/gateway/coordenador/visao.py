@@ -51,6 +51,7 @@ class VisaoColetores:
         self.tamanho_janela = tamanho_janela
         self.validade = validade
         self.coletores_online: set[str] = set()
+        self.coletores_offline: set[str] = set() # Anunciaram offline
         self.sinais: dict[str, dict[str, SinalColetor]] = {} # pulseira -> coletor -> sinal
         self.posse: dict[str, str | None] = {} # pulseira -> coletor responsável
 
@@ -60,10 +61,12 @@ class VisaoColetores:
         if online: 
             mudou = coletor not in self.coletores_online
             self.coletores_online.add(coletor)
+            self.coletores_offline(coletor)
             return mudou
 
         mudou = coletor in self.coletores_online
         self.coletores_online.discard(coletor)
+        self.coletores_offline.add(coletor)
         # Leituras antigas de um coletor offline não podem vencer uma disputa.
         for sinais in self.sinais.values():
             sinais.pop(coletor, None)
@@ -90,6 +93,11 @@ class VisaoColetores:
 
     def atualizar_posse(self, pulseira: str, coletor: str | None) -> None:
         self.posse[pulseira] = coletor
+
+
+    def pulseiras_de(self, coletor: str) -> list[str]:
+        """Pulseiras cuja posse está com o coletor."""
+        return [pulseira for pulseira, dono in self.posse.items() if dono == coletor]
 
 
     def sinais_validos(self, pulseira) -> dict[str, SinalColetor]:
