@@ -1,7 +1,6 @@
 import asyncio
 import os
 import logging
-from typing import TYPE_CHECKING
 
 import aiomqtt
 from bluetooth.domain.erros import BrokerIndisponivel
@@ -13,10 +12,6 @@ from mqtt.domain.topicos import Topicos
 INTERVALO_SINAL_DE_VIDA_PADRAO = 5.0
 
 
-if TYPE_CHECKING:
-    from mqtt.conexao import ConexaoBroker
-
-
 def ler_intervalo_sinal_de_vida(intervalo: float | None = None) -> float:
     """Resolve o intervalo de sinal de vida.
 
@@ -26,10 +21,10 @@ def ler_intervalo_sinal_de_vida(intervalo: float | None = None) -> float:
         ValueError: Se o intervalo não for positivo ou a variável de ambiente não for um número.
     """
     if intervalo is None:
-        intervalo = float(os.getenv("PRESENCA_INTERVALO", INTERVALO_SINAL_DE_VIDA_PADRAO))
+        intervalo = float(os.getenv("PRESENCA_INTERVALO_COLETOR", INTERVALO_SINAL_DE_VIDA_PADRAO))
 
     if intervalo <= 0:
-        raise ValueError("PRESENCA_INTERVALO deve ser maior que zero.")
+        raise ValueError("PRESENCA_INTERVALO_COLETOR deve ser maior que zero.")
     return intervalo
 
 
@@ -56,12 +51,11 @@ class PresencaColetor:
         self._encerrada = False
 
         self.broker.ultima_vontade = self._ultima_vontade()
-        self.broker.ao_conectar = self.anunciar_online
-
+        self.broker.adicionar_ao_conectar(self.anunciar_online)
 
     @property
     def topico(self) -> str:
-        return Topicos.presenca_coletor(self.broker.coletor_id)
+        return Topicos.presenca_coletor(self.broker.cliente_id)
 
     async def anunciar_online(self) -> None:
         """Publica a presença online (retida). Chamada a cada (re)conexão ao broker."""
@@ -69,7 +63,7 @@ class PresencaColetor:
             return
 
         if await self._publicar(EstadoPresenca.ONLINE):
-            logging.info(f"Presença: {EstadoPresenca.ONLINE.value} | Coletor: {self.broker.coletor_id} ")
+            logging.info(f"Presença: {EstadoPresenca.ONLINE.value} | Coletor: {self.broker.cliente_id} ")
 
 
     async def anunciar_offline(self) -> None:
@@ -81,7 +75,7 @@ class PresencaColetor:
         """
         self._encerrada = True
         if await self._publicar(EstadoPresenca.OFFLINE):
-            logging.info(f"Presença: {EstadoPresenca.OFFLINE.value} | Coletor: {self.broker.coletor_id} ")
+            logging.info(f"Presença: {EstadoPresenca.OFFLINE.value} | Coletor: {self.broker.cliente_id} ")
 
 
     async def  atualiar_pulseira(self, pulseira: str | None = None) -> None:
@@ -95,7 +89,7 @@ class PresencaColetor:
             return 
 
         self.pulseira = pulseira
-        logging.info(f"Presença | Coletor: {self.broker.coletor_id} | Pulseira: {pulseira or 'Nenhuma' } ")
+        logging.info(f"Presença | Coletor: {self.broker.cliente_id} | Pulseira: {pulseira or 'Nenhuma' } ")
         if not self._encerrada:
             """ Se falhar, o próximo sinal de vida manda a pulseira atualizada."""
             await self._publicar(EstadoPresenca.ONLINE)
@@ -113,21 +107,20 @@ class PresencaColetor:
                 continue
 
             if await self._publicar(EstadoPresenca.ONLINE):
-                logging.debug(f"Sinal de vida | Coletor: {self.broker.coletor_id} ")
+                logging.debug(f"Sinal de vida | Coletor: {self.broker.cliente_id} ")
 
 
     def mensagem(self, estado: EstadoPresenca) -> Mensagem:
         """Monta a mensagem de presença. O identificador do coletor (origem) e o timestamp vão no envelope."""
         return Mensagem(
             tipo=TipoMensagem.PRESENCA,
-            origem=self.broker.coletor_id,
+            origem=self.broker.cliente_id,
             conteudo={
                 "estado": estado.value,
                 "pulseira": self.pulseira
             },
         )
 
-    
     async def _publicar(self, estado: EstadoPresenca) -> bool:
         """Publica a presença. Devolve False se o broker estiver indisponível, sem lançar erro."""
         try:
@@ -135,7 +128,7 @@ class PresencaColetor:
             return True
         except BrokerIndisponivel as e:
             logging.warning(
-                f"Erro: {BrokerIndisponivel.codigo} | Coletor: {self.broker.coletor_id} | "
+                f"Erro: {BrokerIndisponivel.codigo} | Coletor: {self.broker.cliente_id} | "
                 f"Não foi possível publicar a presença {estado.value}: {e}"
             )
             return False
@@ -149,7 +142,7 @@ class PresencaColetor:
         """
         mensagem = Mensagem(
             tipo=TipoMensagem.PRESENCA,
-            origem=self.broker.coletor_id,
+            origem=self.broker.cliente_id,
             conteudo={
                 "estado": EstadoPresenca.OFFLINE.value,
                 "pulseira": None

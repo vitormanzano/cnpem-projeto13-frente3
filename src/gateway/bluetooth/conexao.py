@@ -1,16 +1,14 @@
 import asyncio
 import logging
 import os
-from collections import deque
-import subprocess
 import re
+from collections import deque
 from collections.abc import Callable
 
-
 from bleak import BleakClient
-from bleak.backends.service import BleakGATTServiceCollection
-from bleak.exc import BleakDeviceNotFoundError, BleakError
 from bleak.backends.characteristic import BleakGATTCharacteristic
+from bleak.exc import BleakDeviceNotFoundError, BleakError
+
 from bluetooth.domain.erros import BluetoothIndisponivel, FalhaConexao, RSSIIndisponivel
 from bluetooth.domain.models import EstadoConexao, LeituraFrequenciaCardiaca, LeituraRSSI, Servico
 
@@ -22,7 +20,7 @@ TIMEOUT_BTMGMT = 2.0
 
 CONNECT_TIMEOUT_PADRAO = 20.0
 
-CARACTERISTICA_FREQUENCIA_CARDIACA_UUID = "uuid"
+CARACTERISTICA_FREQUENCIA_CARDIACA_UUID = "00002a37-0000-1000-8000-00805f9b34fb" # Heart Rate Measurement (0x2A37)
 TAMANHO_MAXIMO_DE_LEITURAS_BUFFER = 10
 
 TratadorLeitura = Callable[[LeituraRSSI], None]
@@ -44,6 +42,7 @@ class ConexaoPulseira:
 
         self.endereco = endereco
         self.timeout_conexao = timeout_conexao
+        self.ao_ler: Callable[[LeituraRSSI], None] | None = None
         self._estado = EstadoConexao.DESCONECTADO
         self._client: BleakClient | None = None
         self._desconectado = asyncio.Event()
@@ -246,7 +245,7 @@ class ConexaoPulseira:
         try: 
 
             processo = await asyncio.create_subprocess_exec(
-                "btmgmt", "--index", "0", "conn-info", "-t", "le_random", self.endereco,
+                "btmgmt", "--index", "0", "conn-info", "-t", "1", self.endereco,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -285,12 +284,14 @@ class ConexaoPulseira:
         while self.conectado:
             try:
                 leitura = await self.ler_rssi()
+                if self.ao_ler:
+                    self.ao_ler(leitura)
                 logging.info(
                     f"Estado: {leitura.estado.value} | Pulseira {self.endereco} |"
                     f"RSSI {leitura.rssi} dbm às {leitura.timestamp:%H:%M:%S.%f}"
                 )
             except RSSIIndisponivel as e:
-                logging.error(f"Erro: {RSSIIndisponivel.codigo} | pulseira {self.endereco}: e")
+                logging.error(f"Erro: {RSSIIndisponivel.codigo} | pulseira {self.endereco}: {e}")
                 return
             await asyncio.sleep(intervalo)
 

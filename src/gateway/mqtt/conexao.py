@@ -2,7 +2,6 @@ import asyncio
 import inspect
 import logging
 import os
-import socket
 from collections.abc import Awaitable, Callable
 
 import aiomqtt
@@ -24,7 +23,7 @@ class ConexaoBroker:
 
     def __init__(
         self,
-        coletor_id: str | None = None,
+        cliente_id: str ,
         host: str | None = None,
         porta: int | None = None,
         usuario: str | None = None,
@@ -36,8 +35,7 @@ class ConexaoBroker:
     ) -> None:
         """
         Args:
-            coletor_id (str | None): Identificador único do coletor, usado como client id. Se omitido,
-                é lido da variável de ambiente COLETOR_ID (padrão: hostname da máquina).
+            cliente_id (str | None): Identificador único do cliente, usado como client id.
             host (str | None): Endereço do broker. Se omitido, é lido de BROKER_HOST (padrão: localhost).
             porta (int | None): Porta do broker. Se omitida, é lida de BROKER_PORTA (padrão: 1883).
             usuario (str | None): Usuário do broker. Se omitido, é lido de BROKER_USUARIO.
@@ -50,7 +48,7 @@ class ConexaoBroker:
             ao_conectar (TratadorConexao | None): Função chamada a cada (re)conexão ao broker, 
                 depois de refazer as assinaturas.
         """
-        self.coletor_id = coletor_id or os.getenv("COLETOR_ID") or socket.gethostname()
+        self.cliente_id = cliente_id
         self.host = host or os.getenv("BROKER_HOST", HOST_PADRAO)
         self.porta = porta or int(os.getenv("BROKER_PORTA", PORTA_PADRAO))
         self.usuario = usuario or os.getenv("BROKER_USUARIO") or None
@@ -60,10 +58,9 @@ class ConexaoBroker:
         )
         self.ao_receber = ao_receber
         self.ultima_vontade = ultima_vontade
+        self._ao_conectar: list[TratadorConexao] = [ao_conectar] if ao_conectar else []
         self._client: aiomqtt.Client | None = None
         self._assinaturas: dict[str, int] = {}
-        self.ao_conectar: list[TratadorConexao] = [ao_conectar] if ao_conectar else []
-
 
     @property
     def conectado(self) -> bool:
@@ -112,7 +109,7 @@ class ConexaoBroker:
             BrokerIndisponivel: Se o coletor não estiver conectado ao broker.
         """
         if self._client is None:
-            raise BrokerIndisponivel(f"Coletor {self.coletor_id} não está conectado ao broker {self.endereco}")
+            raise BrokerIndisponivel(f"Coletor {self.cliente_id } não está conectado ao broker {self.endereco}")
 
         config = mensagem.config_entrega
         try:
@@ -131,14 +128,14 @@ class ConexaoBroker:
                 async with aiomqtt.Client(
                     hostname=self.host,
                     port=self.porta,
-                    identifier=self.coletor_id,
+                    identifier=self.cliente_id ,
                     username=self.usuario,
                     password=self.senha,
                     will=self.ultima_vontade,
                     keepalive=KEEPALIVE_PADRAO,
                 ) as client:
                     self._client = client
-                    logging.info(f"Conectado ao broker {self.endereco} | Coletor {self.coletor_id}")
+                    logging.info(f"Conectado ao broker {self.endereco} | Coletor {self.cliente_id }")
                     await self._refazer_assinaturas()
                     await self._executar_ao_conectar()
 
@@ -177,19 +174,20 @@ class ConexaoBroker:
             logging.exception(f"Erro ao tratar mensagem do tópico {mensagem.topic.value} [{type(e).__name__}]: {e}")
 
 
+    def adicionar_ao_conectar(self, tratador: TratadorConexao) -> None:
+        """Registra uma função chamada a cada (re)conexão ao broker, depois de refazer as assinaturas.
+
+        As funções rodam na ordem em que foram registradas.
+        """
+        self._ao_conectar.append(tratador)
+
+
     async def _executar_ao_conectar(self) -> None:
-        for tratador in self.ao_conectar:
+        for tratador in self._ao_conectar:
             try:
-                resultado = self.ao_conectar()
+                resultado = tratador()
                 if inspect.isawaitable(resultado):
                     await resultado
             except  Exception as e:
                 # Uma falha no gancho não pode derrubar a sessão com o broker
                 logging.exception(f"Erro ao executar ao_conectar [{type(e).__name__}]: {e}")
-
-
-    def adicionar_ao_conectar(self, tratador: TratadorConexao) -> None:
-        """Registra uma função chamada a cada (re)conexão, na ordem de registro."""
-        self.ao_conectar.append(tratador)
-
-

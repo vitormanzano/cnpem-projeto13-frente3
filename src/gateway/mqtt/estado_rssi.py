@@ -3,10 +3,10 @@ import logging
 import os
 
 from bluetooth.domain.erros import BrokerIndisponivel
-from gateway.bluetooth.domain.models import LeituraRSSI
-from gateway.mqtt.conexao import ConexaoBroker
-from gateway.mqtt.domain.models import Mensagem, TipoMensagem
-from gateway.mqtt.domain.topicos import Topicos
+from bluetooth.domain.models import LeituraRSSI
+from mqtt.conexao import ConexaoBroker
+from mqtt.domain.models import Mensagem, TipoMensagem
+from mqtt.domain.topicos import Topicos
 
 
 TAMANHO_FILA_PADRAO = 100
@@ -58,7 +58,7 @@ class EstadoRssiColetor:
         """Coletor (origem) e timestamp da leitura vão no envelope"""
         return Mensagem(
             tipo=TipoMensagem.ESTADO_PULSEIRA,
-            origem=self.broker.coletor_id,
+            origem=self.broker.cliente_id,
             timestamp=leitura.timestamp,
             conteudo={
                 "pulseira": leitura.endereco,
@@ -69,13 +69,13 @@ class EstadoRssiColetor:
 
 
     async def _publicar(self, leitura: LeituraRSSI) -> bool:
-        topico = Topicos.estado_rssi(self.broker.coletor_id, leitura.endereco)
+        topico = Topicos.estado_rssi(self.broker.cliente_id, leitura.endereco)
         try:
             await self.broker.publicar(topico, self.mensagem(leitura))
             return True
         except BrokerIndisponivel as e:
               logging.warning(
-                  f"Erro: {BrokerIndisponivel.codigo} | Coletor: {self.broker.coletor_id} | "
+                  f"Erro: {BrokerIndisponivel.codigo} | Coletor: {self.broker.cliente_id} | "
                   f"Pulseira: {leitura.endereco} | Estado/RSSI não publicado: {e}"
               )
               return False

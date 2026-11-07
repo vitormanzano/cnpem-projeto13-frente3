@@ -1,44 +1,42 @@
+x-gateway: &gateway
+  build: .
+  restart: unless-stopped
+  env_file: .env
+  command: ["python", "src/gateway/app.py"] # O CMD do Dockerfile roda o main.py (roteiro de testes)
+
 services:
   hivemq:
     image: hivemq/hivemq-ce:2026.5
     container_name: cnpem_hivemq
+    profiles: [central]
     restart: unless-stopped
     ports:
-      - "1883:1883" # MQTT TCP
+      - "1883:1883"
     volumes:
       - hivemq-data:/opt/hivemq/data
       - hivemq-log:/opt/hivemq/log
 
-  gateway:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: cnpem_gateway_ble
-    restart: unless-stopped
-
-    # Comunicação direta com a interface de rede do host
-    network_mode: "host"
-
-    # Privilégios necessários para controle dos adaptadores Bluetooth e raw sockets
-    privileged: true
-
-    # Mapeamento do socket D-Bus do sistema operacional hospedeiro
-    # O Bleak (Linux) utiliza o daemon bluetoothd do host através do D-Bus
+  coordenador:
+    <<: *gateway
+    profiles: [central]
+    environment:
+      PAPEL: coordenador
+      BROKER_HOST: hivemq
     volumes:
-      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
       - ./src:/app/src
-
-    # Habilita modo interativo no terminal (necessário para o menu com input() em main.py)
-    stdin_open: true
-    tty: true
-
     depends_on:
       - hivemq
 
+  coletor:
+    <<: *gateway
+    profiles: [coletor]
     environment:
-      - PYTHONUNBUFFERED=1
-      - MQTT_HOST=localhost
-      - MQTT_PORT=1883
+      PAPEL: coletor # BROKER_HOST vem do .env, é o IP da máquina que tem o broker
+    network_mode: host # também dá ao container o hostname da máquina, que é o id do coletor
+    privileged: true
+    volumes:
+      - ./src:/app/src
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
 
 volumes:
   hivemq-data:
