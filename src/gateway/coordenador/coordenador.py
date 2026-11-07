@@ -107,7 +107,7 @@ class Coordenador:
             logging.info(f"Presença | Coletor: {coletor} | {estado.value}")
 
         if not online:
-            fo rpulseira in self.visao.pulseiras_de(coletor):
+            for pulseira in self.visao.pulseiras_de(coletor):
                 await self._liberar_posse_orfa(pulseira, coletor)
 
 
@@ -165,13 +165,6 @@ class Coordenador:
         await self._avaliar(pulseira, coletor, sinal)
 
 
-    def _tratar_posse(self, topico: str, mensagem: Mensagem) -> None:
-        pulseira = Topicos.extrair_estado_posse(topico)
-        if pulseira is None:
-            return
-        self.visao.atualizar_posse(pulseira, mensagem.conteudo.get("coletor"))
-
-    
     async def _tratar_liberacao(self, topico: str, mensagem: Mensagem) -> None:
         pulseira = Topicos.extrair_liberacao_posse(topico)
         if pulseira is None:

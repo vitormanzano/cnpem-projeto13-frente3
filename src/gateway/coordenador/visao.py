@@ -61,7 +61,7 @@ class VisaoColetores:
         if online: 
             mudou = coletor not in self.coletores_online
             self.coletores_online.add(coletor)
-            self.coletores_offline(coletor)
+            self.coletores_offline.discard(coletor)
             return mudou
 
         mudou = coletor in self.coletores_online
