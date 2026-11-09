@@ -126,6 +126,27 @@ async def espiar(*topicos: str) -> None:
 
 # ------------------------------------------------------------------ BLE
 
+async def teste_rf01(duracao: float | None = None) -> None:
+    """RF01 - Listar os dispositivos BLE anunciando ao alcance, com endereço, nome e RSSI.
+
+    Com TARGET_ADDRESS definido, confere se a pulseira apareceu (ligada e sem conexão com outro aparelho).
+    Para a mensagem de Bluetooth desligado, rode antes `bluetoothctl power off`.
+    """
+    dispositivos = await find_all_local_devices(duracao)
+    if not dispositivos:
+        print("Nenhum dispositivo BLE encontrado. Confira se há dispositivos ligados e anunciando ao alcance do coeltor.")
+        return
+
+    print(f"{'Endereco': < 17} {'RSSI':>8} Nome")
+    for dispositivo in dispositivos:
+        print(f"{dispositivo.endereco:<17} {dispositivo.rssi:>4} dBm {dispositivo.nome}")
+
+    enderecos = [dispositivo.endereco.upper() for dispositivo in dispositivos]
+    _verificar("cada dispositivo aparece uma única vez", len(enderecos) == len(set(enderecos)))
+    if alvo := os.getenv("TARGET_ADDRESS"):
+        _verificar(f"pulseira {alvo} na lista", alvo.upper() in enderecos)
+
+
 async def teste_rf03() -> None:
     """RF03 - Conectar à pulseira: conecta, consulta estado e serviços, libera e testa a falha com endereço inexistente."""
     conexao = ConexaoPulseira(_config("TARGET_ADDRESS"))

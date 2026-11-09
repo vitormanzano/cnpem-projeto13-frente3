@@ -52,7 +52,7 @@ async def find_all_local_devices(timeout: float | None = None) -> list[Dispositi
         devices_dict = await BleakScanner.discover(return_adv=True, timeout=timeout)
     except (BleakError, OSError) as e:
         logging.error(f"Falha ao iniciar varredura BLE [{type(e).__name__}]: {e}")
-        raise BluetoothIndisponivel(str(e)) from e
+        raise BluetoothIndisponivel(MENSAGEM_BLUETOOTH_DESLIGADO) from e
 
     dispositivos = [
         DispositivoBLE(
