@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from coletor.coletor import Coletor, identificador_coletor
 from coordenador.coordenador import Coordenador
+from gateway.bluetooth.scanner import ler_endereco_pulseira
 from mqtt.conexao import ConexaoBroker
 
 logging.basicConfig(
@@ -24,9 +25,10 @@ load_dotenv()
 
 async def rodar_coletor() -> None:
     cliente_id = identificador_coletor()
-    endereco = os.getenv("TARGET_ADDRESS")
-    if not endereco:
-        raise SystemExit("Defina TARGET_ADDRESS.")
+    try:
+        endereco = ler_endereco_pulseira()
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
     logging.info(f"Iniciando como coletor | id {cliente_id}")
     coletor = Coletor(ConexaoBroker(cliente_id=cliente_id), endereco)
     await coletor.assinar_topicos()

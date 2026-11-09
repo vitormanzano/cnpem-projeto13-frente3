@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import time
+import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from statistics import median
@@ -16,7 +17,7 @@ from bluetooth.domain.models import DispositivoBLE, EstadoConexao, LeituraRSSI, 
 
 
 def ler_duracao_varredura(duracao: float | None = None) -> float: 
-    """Resolve a duração da varredura do RF01.
+    """Resolve a duração da varredura do RF01 e o tempo limite da busca do RF02.
 
     Se omitida, é lida da variável de ambiente SCAN_TIMEOUT, em segundos (padrão de 10 s).
 
@@ -30,17 +31,41 @@ def ler_duracao_varredura(duracao: float | None = None) -> float:
     return duracao
 
 
+def ler_endereco_pulseira(endereco: str | None = None) -> str:
+    """Resolve o endereço MAC da pulseira (RF02).
+
+    Args 
+        endereco (str | None): Endereço MAC. Se omitido, é lido da variável de ambiente TARGET_ADDRESS.
+
+    Returns: 
+        str: endereço em maiúsuclas, no formato AA:BB:CC:DD:EE:FF
+
+    Raises:
+        ValueError: Se o endereço estiver ausente ou não for um MAC válido.
+    """
+    if endereco is None:
+        endereco = os.getenv("TARGET_ADDRESS", "")
+    endereco = endereco.strip().upper()
+    if not endereco:
+        raise ValueError("TARGET_ADDRESS não definido. Informe o endereço MAC da pulseira.")
+    if not PADRAO_MAC.fullmatch(endereco):
+        raise ValueError(f"TARGET_ADDRESS inválido: {endereco!r}. Use um endereço MAC no formato AA:BB:CC:DD:EE:FF.")
+    return endereco
+
+
 SCAN_TIMEOUT_PADRAO          = 10.0
 INTERVALO_RSSI_PADRAO        = 1.0
 TEMPO_AUSENCIA_PADRAO        = 5.0
 INTERVALO_RETOMADA           = 5.0
 
-CODIGO_RSSI_INDISPONIVEL     = 127
+CODIGO_RSSI_INDISPONIVEL     = -127
 
 NOME_PADRAO                  = "Desconhecido / Oculto"
 MENSAGEM_BLUETOOTH_DESLIGADO = (
     "Bluetooth desligado ou indisponível. Ative o Bluetooth do coletor e tente novamente."
 )
+
+PADRAO_MAC = re.compile(r"[0-9A-F]{2}(:[0-9A-F]{2}){5}")
 
 async def find_all_local_devices(timeout: float | None = None) -> list[DispositivoBLE]:
     """Lista os dispositivos BLE anunciando ao alcance do coletor (RF01).
@@ -108,6 +133,46 @@ async def varrer_pulseira(endereco: str, ao_anuncio: Callable[[Pulseira], None])
             await scanner.stop()
         except (BleakError, OSError) as e:
             logging.warning(f"Falha ao parar a varredura [{type(e).__name__}]: {e}")
+
+
+async def localizar_pulseira(endereco: str, timeout: float | None = None) -> Pulseira:
+    """Procura a pulseira pelo endereço e encerra a busca no primeiro anúncio (RF02).
+
+    Args: 
+        endereco (str): Endereço MAC da pulseira.
+        timeout (float | None): Tempo limite da busca em segundos. Se omitido, vem de SCAN_TIMEOUT (padrão de 10 s).
+
+    Returns:
+        Pulseira: Endereço. nome (ou rótulo padrão) e RSSI em dBm do primeiro anúncio.
+
+    Raises: 
+        ValueError: Se o tempo limite for inválido.
+    """
+    timout = ler_duracao_varredura(timeout);
+    encontrada = asyncio.Event()
+    pulseira: Pulseira | None = None
+
+    def ao_anuncio(anuncio: Pulseira) -> None:
+        nonlocal pulseira
+        if anuncio.rssi == CODIGO_RSSI_INDISPONIVEL or encontrada.is_set(): # Anúncio sem RSSI
+            return
+        pulseira = anuncio
+        encontrada.set()
+
+    logging.info(f"Procurando pulseira {endereco} por até {timeout:g}s")
+    async with varrer_pulseira(endereco, ao_anuncio):
+        try:
+            await asyncio.wait_for(encontrada.wait(), timeout)
+        except asyncio.TimeoutError:
+            logging.warning(
+                    f"Estado: {EstadoConexao.NAO_ENCONTRADO.value} | Erro: {PulseiraNaoEncontrada.codigo} |"
+                    f"Pulseira {endereco} não encontrada em {timeout:g}s"
+                )
+            raise PulseiraNaoEncontrada(f"Pulseira {endereco} não encontrada em {timeout:g}s") from None
+    logging.info(f"Pulseira encontrada: {pulseira.endereco} | {pulseira.nome} | {pulseira.rssi} dBm ")
+    return pulseira
+
+
 
 
 class VarreduraPulseira:
