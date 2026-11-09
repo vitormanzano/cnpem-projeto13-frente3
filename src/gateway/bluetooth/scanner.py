@@ -15,6 +15,21 @@ from bluetooth.domain.erros import BluetoothIndisponivel, PulseiraNaoEncontrada
 from bluetooth.domain.models import DispositivoBLE, EstadoConexao, LeituraRSSI, Pulseira
 
 
+def ler_duracao_varredura(duracao: float | None = None) -> float: 
+    """Resolve a duração da varredura do RF01.
+
+    Se omitida, é lida da variável de ambiente SCAN_TIMEOUT, em segundos (padrão de 10 s).
+
+    Raises: 
+        ValueError: Se a duração não for positiva ou a variável de ambiente não for um número
+    """
+    if duracao is None:
+        duracao = float(os.getenv("SCAN_TIMEOUT", SCAN_TIMEOUT_PADRAO))
+    if duracao <= 0:
+        raise ValueError("SCAN_TIMEOUT deve ser maior que zero (em segundos).")
+    return duracao
+
+
 SCAN_TIMEOUT_PADRAO          = 10.0
 INTERVALO_RSSI_PADRAO        = 1.0
 TEMPO_AUSENCIA_PADRAO        = 5.0
@@ -34,7 +49,7 @@ async def find_all_local_devices(timeout: float | None = None) -> list[Dispositi
     com o RSSI do anúncio mais recente.
 
     Args:
-        timeout (float): Duração da varredura em segundos.
+        timeout (float | None): Duração da varredura em segundos. Se omitida, vem de SCAN_TIMEOUT (padrão de 10 s).
 
     Returns:
         list[DispositivoBLE]: Dispositivos ordenados do sinal mais forte para o mais fraco.
@@ -42,9 +57,9 @@ async def find_all_local_devices(timeout: float | None = None) -> list[Dispositi
 
     Raises:
         BluetoothIndisponivel: Se o Bluetooth estiver desligado ou inacessível.
+        ValueError: Se a duração configurada for inválida.
     """
-    if timeout is None:
-        timeout = float(os.getenv("SCAN_TIMEOUT", SCAN_TIMEOUT_PADRAO))
+    timeout = ler_duracao_varredura(timeout)
 
     logging.info(f"Iniciando varredura BLE por {timeout:g}s")
 
