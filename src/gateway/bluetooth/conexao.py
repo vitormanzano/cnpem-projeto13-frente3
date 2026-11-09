@@ -2,10 +2,11 @@ import asyncio
 import logging
 import os
 import re
+import time
 from collections import deque
 from collections.abc import Callable
 
-from bleak import BleakClient
+from bleak import BleakClient, BleakScanner
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.exc import BleakDeviceNotFoundError, BleakError
 
@@ -19,11 +20,30 @@ INTERVALO_RSSI_PADRAO = 1.0
 TIMEOUT_BTMGMT = 2.0
 
 CONNECT_TIMEOUT_PADRAO = 20.0
+# O bleak 1.1.1 reporta adaptador ausente ou desligado como BleakError genérico
+TRECHOS_ADAPTADOR_INDISPONIVEL = ("Bluetooth adapters found", "org.bluez.Error.NotReady")
 
 CARACTERISTICA_FREQUENCIA_CARDIACA_UUID = "00002a37-0000-1000-8000-00805f9b34fb" # Heart Rate Measurement (0x2A37)
 TAMANHO_MAXIMO_DE_LEITURAS_BUFFER = 10
 
 TratadorLeitura = Callable[[LeituraRSSI], None]
+
+
+def ler_timeout_conexao(timeout: float | None = None) -> float:
+    """Resolve o tempo limite total da conexão GATT, localização incluída (RF03).
+
+    Args:
+        timeout (float | None): Segundos. Se omitido, é lido da variável de ambiente
+            CONNECT_TIMEOUT (padrão de 20 s).
+
+    Raises:
+        ValueError: Se o tempo não for positivo ou a variável de ambiente não for um número.
+    """
+    if timeout is None:
+        timeout = float(os.getenv("CONNECT_TIMEOUT", CONNECT_TIMEOUT_PADRAO))
+    if timeout <= 0:
+        raise ValueError("CONNECT_TIMEOUT deve ser maior que zero (em segundos).")
+    return timeout
 
 
 class ConexaoPulseira:
@@ -37,11 +57,9 @@ class ConexaoPulseira:
             timeout_conexao (float | None): Tempo limite da conexão em segundos. Se omitido,
                 é lido da variável de ambiente CONNECT_TIMEOUT (padrão de 20 s).
         """
-        if timeout_conexao is None:
-            timeout_conexao = float(os.getenv("CONNECT_TIMEOUT", CONNECT_TIMEOUT_PADRAO))
 
         self.endereco = endereco
-        self.timeout_conexao = timeout_conexao
+        self.timeout_conexao = ler_timeout_conexao(timeout_conexao)
         self.ao_ler: Callable[[LeituraRSSI], None] | None = None
         self._estado = EstadoConexao.DESCONECTADO
         self._client: BleakClient | None = None
@@ -134,25 +152,27 @@ class ConexaoPulseira:
 
         self._encerramento_solicitado = False
         self._desconectado.clear()
-        self._client = BleakClient(
-            self.endereco,
-            timeout=self.timeout_conexao,
-            disconnected_callback=self._ao_desconectar,
-        )
 
+        inicio = time.monotonic()
         try:
+            # Localiza antes de conectar: só com o endereço, o bleak gasta o timeout duas vezes
+            # (varredura + conexão) e o total chegaria ao dobro do CONNECT_TIMEOUT
+            dispositivo = await BleakScanner.find_device_by_address(self.endereco, timeout=self.timeout_conexao)
+            if dispositivo is None:
+                raise self._registrar_falha("dispositivo ausente", EstadoConexao.NAO_ENCONTRADO)
+            restante = self.timeout_conexao - (time.monotonic() - inicio)
+            self._client = BleakClient(dispositivo, timeout=restante, disconnected_callback=self._ao_desconectar)
             await self._client.connect()
-        except asyncio.TimeoutError:
-            self._registrar_falha(f"tempo esgotado ({self.timeout_conexao:g}s)")
-        except BleakDeviceNotFoundError:
-            self._registrar_falha("dispositivo ausente", EstadoConexao.NAO_ENCONTRADO)
+        except TimeoutError as e:
+            raise self._registrar_falha(f"tempo esgotado ({self.timeout_conexao:g}s)") from e 
+        except BleakDeviceNotFoundError as e:
+            raise self._registrar_falha("dispositivo ausente", EstadoConexao.NAO_ENCONTRADO) from e
         except BleakError as e:
-            self._registrar_falha(f"dispositivo ocupado ou recusou a conexão: {e}")
+            if any(trecho in str(e) for trecho in TRECHOS_ADAPTADOR_INDISPONIVEL):
+                raise self._registrar_bluetooth_indisponivel(e) from e
+            raise self._registrar_falha(f"dispositivo ocupado ou recusou a conexão: {e}") from e
         except OSError as e:
-            self._client = None
-            self._desconectado.set()
-            logging.error(f"Bluetooth indisponível [{type(e).__name__}]: {e}")
-            raise BluetoothIndisponivel(str(e)) from e
+            raise self._registrar_bluetooth_indisponivel(e) from e
 
         self._mudar_estado(EstadoConexao.CONECTADO, f"{len(self._client.services.services)} serviço(s) disponível(is)")
 
@@ -198,12 +218,20 @@ class ConexaoPulseira:
             "Liberada" if self._encerramento_solicitado else "desconectou inesperadamente")
         self._desconectado.set()
 
-    def _registrar_falha(self, motivo: str, estado: EstadoConexao =  EstadoConexao.DESCONECTADO) -> None:
+    def _registrar_falha(self, motivo: str, estado: EstadoConexao =  EstadoConexao.DESCONECTADO) -> FalhaConexao:
+        """Registra a falha e devolve o erro, para o chamador levantar com 'from e'"""
         self._client = None
         self._mudar_estado(estado, motivo)
         self._desconectado.set()
         logging.error(f"Estado: {self._estado.value} | Erro: {FalhaConexao.codigo} | Pulseira {self.endereco}: {motivo}")
-        raise FalhaConexao(motivo)
+        return FalhaConexao(motivo)
+
+
+    def _registrar_bluetooth_indisponivel(self, e: Exception) -> BluetoothIndisponivel:
+        self._client = None
+        self._desconectado.set()
+        logging.error(f"Erro: {BluetoothIndisponivel.codigo} | Pulseira: {self.endereco} | {type(e).__name__}: {e}")
+        return BluetoothIndisponivel(str(e))
 
 
     async def iniciar_leitura_frequencia_cardiaca(self) -> None:
