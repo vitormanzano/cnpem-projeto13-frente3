@@ -14,6 +14,7 @@ from bleak.exc import BleakError
 
 from bluetooth.domain.erros import BluetoothIndisponivel, PulseiraNaoEncontrada
 from bluetooth.domain.models import DispositivoBLE, EstadoConexao, LeituraRSSI, Pulseira
+from bluetooth.domain.classificacao_conexao import ClassificacaoConexao
 
 
 def ler_duracao_varredura(duracao: float | None = None) -> float: 
@@ -178,7 +179,8 @@ async def localizar_pulseira(endereco: str, timeout: float | None = None) -> Pul
 class VarreduraPulseira:
     """Escuta os anúncios da pulseira sem se conectar e entrega uma leitura a cada `intervalo`."""
 
-    def __init__(self, endereco: str, intervalo: float | None = None, tempo_ausencia: float | None = None) -> None:
+    def __init__(self, endereco: str, intervalo: float | None = None, tempo_ausencia: float | None = None,
+                 classificacao: ClassificacaoConexao | None = None) -> None:
         self.endereco = endereco
         self.ao_ler: Callable[[LeituraRSSI], None] | None = None
         self.intervalo = intervalo or float(os.getenv("RSSI_INTERVALO", INTERVALO_RSSI_PADRAO))
@@ -187,7 +189,7 @@ class VarreduraPulseira:
         self._rssis: list[int] = [] # RSSI de cada anúncio no intervalo atual
         self._nome: str | None = None
         self._visto_em = 0.0
-        self._estado: EstadoConexao | None = None
+        self._classificacao = classificacao if classificacao is not None else ClassificacaoConexao()
 
 
     def _ao_anuncio(self, pulseira: Pulseira) -> None:
@@ -208,17 +210,17 @@ class VarreduraPulseira:
 
 
     def _registrar_mudanca(self, leitura: LeituraRSSI) -> None:
-        """Loga só quando a pulseira aparece ou some, não a cada segundo."""
-        if leitura.estado is self._estado:
+        """Loga só quando o estado muda, não a cada intervalo."""
+        anterior = self._classificacao.mudar(leitura.estado)
+        if anterior is None:
             return
-        self._estado = leitura.estado
+        transicao = f"Estado: {anterior.value} -> {leitura.estado.value} | Pulseira: {self.endereco}"
         if leitura.estado is EstadoConexao.NAO_ENCONTRADO:
             logging.warning(
-                f"Estado: {leitura.estado.value} | Erro: {PulseiraNaoEncontrada.codigo} | "
-                f"Pulseira {self.endereco} sem anúncios há {self.tempo_ausencia} s"
+                f"{transicao} | Erro: {PulseiraNaoEncontrada.codigo} | Sem anúncios há {self.tempo_ausencia:g}s"
             )
         else:
-            logging.info(f"Pulseira encontrada: {self.endereco} | {self._nome} | {leitura.rssi} dBm.")
+            logging.info(f"{transicao} | Pulseira encontrada | Nome: {self._nome} | RSSI: {leitura.rssi} dBm")
 
 
     async def executar(self) -> None:

@@ -4,7 +4,9 @@ import socket
 import logging
 
 from bluetooth.conexao import ConexaoPulseira
+from bluetooth.domain.classificacao_conexao import ClassificacaoConexao
 from bluetooth.domain.erros import BluetoothIndisponivel, BrokerIndisponivel, FalhaConexao
+from bluetooth.domain.models import EstadoConexao
 from bluetooth.reconexao import manter_conexao
 from bluetooth.scanner import VarreduraPulseira
 from mqtt.estado_rssi import EstadoRssiColetor
@@ -29,17 +31,24 @@ class Coletor:
     """Coletor BLE: Realiza todas as ações que um coletor precisa."""
 
     def __init__(self, broker: ConexaoBroker, endereco_pulseira: str) -> None:
-        self.broker                        = broker
-        self.endereco                      = endereco_pulseira
-        self.presenca                      = PresencaColetor(broker)    # antes de conectar: registra a última vontade
-        self.estado_rssi                   = EstadoRssiColetor(broker)  # O online sai antes do RSSI
-        self.varredura                     = VarreduraPulseira(endereco_pulseira)
-        self.varredura.ao_ler              = self.estado_rssi.registrar # Cada leitura entra na fila de publicação
-        self.conexao                       = ConexaoPulseira(endereco_pulseira)
-        self.conexao.ao_ler                = self.estado_rssi.registrar # RSSI "conectado" para o coordenador
+        self.broker                          = broker
+        self.endereco                        = endereco_pulseira
+        self.presenca                        = PresencaColetor(broker)    # antes de conectar: registra a última vontade
+        self.estado_rssi                     = EstadoRssiColetor(broker)  # O online sai antes do RSSI
+        self._classificacao                  = ClassificacaoConexao()     # Um estado só, da varredura à conexão (RF08)
+        self.varredura                       = VarreduraPulseira(endereco_pulseira, classificacao=self._classificacao)
+        self.varredura.ao_ler                = self.estado_rssi.registrar # Cada leitura entra na fila de publicação
+        self.conexao                         = ConexaoPulseira(endereco_pulseira, classificacao=self._classificacao)
+        self.conexao.ao_ler                  = self.estado_rssi.registrar # RSSI "conectado" para o coordenador
         self._varredura: asyncio.Task | None = None
-        self._sessao: asyncio.Task | None  = None                       # Conexão enquanto tiver a psse
-        self.broker.ao_receber             = self.ao_receber
+        self._sessao: asyncio.Task | None    = None                       # Conexão enquanto tiver a psse
+        self.broker.ao_receber               = self.ao_receber
+
+
+    @property
+    def estado(self) -> EstadoConexao:
+        """Estado da conexão com a pulseira (RF08): o da varredura sem a posse, o da conexão GATT com ela."""
+        return self._classificacao.atual
 
 
     async def assinar_topicos(self) -> None:
@@ -116,7 +125,7 @@ class Coletor:
             origem=self.broker.cliente_id,
             conteudo={
                 "pulseira": self.endereco,
-                }
+            }
         )
         try:
             await self.broker.publicar(Topicos.liberacao_posse(self.endereco), mensagem)

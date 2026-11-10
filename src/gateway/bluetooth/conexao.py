@@ -15,6 +15,7 @@ from bluetooth.domain.erros import (
 )
 from bluetooth.domain.models import EstadoConexao, LeituraFrequenciaCardiaca, LeituraRSSI, Servico
 from bluetooth.domain.frequencia_cardiaca import interpretar_medicao
+from bluetooth.domain.classificacao_conexao import ClassificacaoConexao
 
 
 PADRAO_RSSI = re.compile(r"RSSI (-?\d+)")
@@ -148,7 +149,8 @@ class ConexaoPulseira:
                  ao_atualizar: TratadorLeitura | None = None,
                  tempo_sem_leitura_fc: float | None = None,
                  intervalo_rssi: float | None = None,
-                 falhas_maximas_rssi: int | None = None) -> None:
+                 falhas_maximas_rssi: int | None = None,
+                 classificacao: ClassificacaoConexao | None = None) -> None:
         """
         Args:
             endereco (str): Endereço MAC (Linux) ou UUID (macOS) da pulseira.
@@ -163,6 +165,8 @@ class ConexaoPulseira:
             falhas_maximas_rssi (int | None): Falhas seguidas de RSSI que derrubam a conexão para
                 reconectar (RF04, RF05). Se omitido, é lido da variável de ambiente
                 RSSI_MAX_FALHAS (padrão de 3).
+            classificacao (ClassificacaoConexao | None): Estado da conexão compartilhado com a 
+                varredura do coletor. Se omitido, a conexão mantém o seu próprio.
 
         Raises:
             ValueError: Se alguma configuração for inválida.
@@ -174,7 +178,7 @@ class ConexaoPulseira:
         self.intervalo_rssi = ler_intervalo_rssi(intervalo_rssi)
         self.falhas_maximas_rssi = ler_falhas_maximas_rssi(falhas_maximas_rssi)
         self.ao_ler: TratadorLeitura | None = None
-        self._estado = EstadoConexao.DESCONECTADO
+        self._classificacao = classificacao if classificacao is not None else ClassificacaoConexao()
         self._client: BleakClient | None = None
         self._desconectado = asyncio.Event()
         self._encerramento_solicitado = False
@@ -208,7 +212,7 @@ class ConexaoPulseira:
     @property
     def estado(self) -> EstadoConexao:
         """Estado atual da conexão com a pulseira."""
-        return self._estado
+        return self._classificacao.atual
 
     @property
     def conectado(self) -> bool:
@@ -320,7 +324,7 @@ class ConexaoPulseira:
 
         if self._client.is_connected:
             logging.error(
-                f"Estado: {self._estado.value} | Erro: {FalhaConexao.codigo} | "
+                f"Estado: {self.estado.value} | Erro: {FalhaConexao.codigo} | "
                 f"Pulseira {self.endereco} continua conectada após a desconexão"
             )
             raise FalhaConexao(f"Não foi possível liberar a pulseira {self.endereco}")
@@ -342,7 +346,7 @@ class ConexaoPulseira:
         self._marcar_desconectado()
 
     def _marcar_desconectado(self) -> None:
-        if self._estado is EstadoConexao.DESCONECTADO and self._desconectado.is_set():
+        if self.estado is EstadoConexao.DESCONECTADO and self._desconectado.is_set():
             return
         self._mudar_estado(EstadoConexao.DESCONECTADO, self._motivo_desconexao or "desconectou inesperadamente")
         self._desconectado.set()
@@ -352,7 +356,7 @@ class ConexaoPulseira:
         self._client = None
         self._mudar_estado(estado, motivo)
         self._desconectado.set()
-        logging.error(f"Estado: {self._estado.value} | Erro: {FalhaConexao.codigo} | Pulseira {self.endereco}: {motivo}")
+        logging.error(f"Estado: {self.estado.value} | Erro: {FalhaConexao.codigo} | Pulseira {self.endereco}: {motivo}")
         return FalhaConexao(motivo)
 
 
@@ -406,7 +410,7 @@ class ConexaoPulseira:
                 if self.conectado and not em_silencio:
                     em_silencio = True
                     logging.warning(
-                        f"Estado: {self._estado.value} | Pulseira: {self.endereco} | "
+                        f"Estado: {self.estado.value} | Pulseira: {self.endereco} | "
                         f"Nenhuma leitura de frequência cardíaca há {self.tempo_sem_leitura_fc:g}s"
                     )
                 continue
@@ -522,11 +526,9 @@ class ConexaoPulseira:
 
 
     def _mudar_estado(self, novo: EstadoConexao, motivo: str = "") -> None:
-        if novo is self._estado:
-            return 
-
-        anterior = self._estado
-        self._estado = novo
+        anterior = self._classificacao.mudar(novo)
+        if anterior is None:
+            return
         logging.info(
                 f"Estado: {anterior.value} -> {novo.value} | Pulseira: {self.endereco}"
                 + (f" | {motivo}" if motivo else "")
