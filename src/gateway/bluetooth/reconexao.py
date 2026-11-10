@@ -135,7 +135,9 @@ async def _aguardar_fim_da_conexao(conexao: "ConexaoPulseira", monitor_rssi: asy
     desconexao = asyncio.create_task(conexao.aguardar_desconexao())
     try:
         await asyncio.wait({desconexao, monitor_rssi}, return_when=asyncio.FIRST_COMPLETED)
-        if not desconexao.done() and _desistiu_do_rssi(monitor_rssi):
+        # Numa liberação em curso, o btmgmt já responde "Not Connected": derrubar para reconectar
+        # trocaria a desconexão intencional por queda e o laço reconectaria (RF10)
+        if not desconexao.done() and not conexao.desconexao_intencional and _desistiu_do_rssi(monitor_rssi):
             logging.error(
                 f"Estado: {conexao.estado.value} | Erro: {RSSIIndisponivel.codigo} | "
                 f"Pulseira {conexao.endereco}: {monitor_rssi.exception()} | Derrubando a conexão para reconectar"

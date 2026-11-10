@@ -48,6 +48,18 @@ class EstadoRssiColetor:
             await self._publicar(leitura)
 
 
+    async def publicar_pendentes(self) -> None:
+        """Publica na hora as leituras que ainda estão na fila, na ordem em que chegaram.
+
+        Usada na desconexão controlada, para o estado desconectado sair antes da liberação da
+        posse e da presença offline (RF10). Sem broker, descarta: a reconexão republica a última.
+        """
+        while not self._fila.empty():
+            leitura = self._fila.get_nowait()
+            if self.broker.conectado:
+                await self._publicar(leitura)
+
+
     async def republicar_ultima(self) -> None:
         """Republica o último estado da pulseira. Chaamada a cada (re)conexão ao broker"""
         if self._ultima is not None:

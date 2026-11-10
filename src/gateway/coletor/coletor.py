@@ -39,7 +39,7 @@ class Coletor:
         self.varredura                       = VarreduraPulseira(endereco_pulseira, classificacao=self._classificacao)
         self.varredura.ao_ler                = self.estado_rssi.registrar # Cada leitura entra na fila de publicação
         self.conexao                         = ConexaoPulseira(endereco_pulseira, classificacao=self._classificacao)
-        self.conexao.ao_ler                  = self.estado_rssi.registrar # RSSI "conectado" para o coordenador
+        self.conexao.ao_atualizar            = self.estado_rssi.registrar # Estado e RSSI da conexão, inclusive o desconectado (RF10)
         self._varredura: asyncio.Task | None = None
         self._sessao: asyncio.Task | None    = None                       # Conexão enquanto tiver a psse
         self.broker.ao_receber               = self.ao_receber
@@ -67,6 +67,7 @@ class Coletor:
                 if (mensagem.conteudo.get("pulseira") == self.endereco
                         and mensagem.conteudo.get("origem") == self.broker.cliente_id):
                     await self._liberar("handoff")
+                    self._iniciar_varredura() # Volta a disputar como favorito
 
 
     async def _tratar_posse(self, dono: str | None) -> None:
@@ -98,13 +99,13 @@ class Coletor:
 
 
     async def _liberar(self, motivo: str) -> None:
-        """Desconecta, e só depois publica a liberação: o coordenador não pode conceder a posse
-        a outro coletor enqunato este ainda estiver conectado.
+        """Desconecta, publica o estado desconectado e só depois a liberação: o coordenador
+        não pode conceder a posse a outro coletor enquanto este ainda estiver conectado.
         """
         logging.info(f"Liberando a pulseira {self.endereco} | Motivo: {motivo}")
         await self._desconectar()
+        await self.estado_rssi.publicar_pendentes()
         await self._publicar_liberacao()
-        self._iniciar_varredura() # Volta a disputar com preferência
 
 
     async def _desconectar(self) -> None:
@@ -156,6 +157,7 @@ class Coletor:
         try:
             await asyncio.wait(tarefas, return_when=asyncio.FIRST_EXCEPTION)
         finally:
+            await self._parar_varredura()
             if self._sessao is not None:
                 await self._liberar("encerramento")
             await self.presenca.anunciar_offline()

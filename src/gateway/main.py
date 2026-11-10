@@ -320,7 +320,7 @@ async def teste_rf10(conectada_por: float = 10) -> None:
 
     Para "o encerramento do coletor libera a conexão", aperte Ctrl+C enquanto estiver conectada:
     deve aparecer "Desconectando da pulseira" no log.
-    O estado desconectado publicado no broker é conferido no teste_rf09.
+    Estado desconectado publicado, liberação da posse e ordem do encerramento estão em tests/test_desconexao.py.
     """
     endereco = _config("TARGET_ADDRESS")
     conexao = ConexaoPulseira(endereco)
@@ -339,8 +339,8 @@ async def teste_rf10(conectada_por: float = 10) -> None:
     await asyncio.sleep(2)  # tempo para a pulseira voltar a anunciar
     try:
         leitura = await _primeira_leitura(endereco)
-        _verificar("pulseira voltou a aparecer na varredura", 
-                   leitura is not None and leitura.estado is EstadoConexao.NAO_ENCONTRADO)
+        _verificar("pulseira voltou a aparecer na varredura",
+                   leitura is not None and leitura.estado is EstadoConexao.DESCONECTADO)
     except PulseiraNaoEncontrada:
         _verificar("pulseira voltou a aparecer na varredura", False)
 
