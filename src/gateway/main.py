@@ -7,7 +7,7 @@ import socket
 import time
 from collections.abc import Callable
 from dataclasses import fields
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
@@ -188,26 +188,40 @@ async def teste_rf07() -> None:
 
 
 async def teste_rf04(duracao: float = 30) -> None:
-    """RF04 - Ler RSSI por `duracao` s junto com a frequência cardíaca. O intervalo vem de RSSI_INTERVALO."""
+    """RF04 - Ler RSSI por `duracao` s junto com a frequência cardíaca. O intervalo vem de RSSI_INTERVALO.
+
+    Sem btmgmt ou sem root, o monitor deve parar com rssi-indisponivel e o motivo. As falhas seguidas
+    que derrubam a conexão (RSSI_MAX_FALHAS) estão em tests/test_rssi.py e tests/test_reconexao.py.
+    """
+    lidas: list[LeituraRSSI] = []
+
+    def ao_ler(leitura: LeituraRSSI) -> None:
+        lidas.append(leitura)
+        logging.info(f"RSSI: {leitura.rssi} dBm | Horário: {leitura.timestamp:%H:%M:%S.%f}")
+
     async with ConexaoPulseira(_config("TARGET_ADDRESS")) as conexao:
+        conexao.ao_ler = ao_ler
         fc_ativa = await _tentar_assinar_fc(conexao)
+        inicio = datetime.now(timezone.utc)
         monitor = asyncio.create_task(conexao.monitorar_rssi())
         await asyncio.wait({monitor}, timeout=duracao)
         parou_sozinho = monitor.done()
         await _encerrar(monitor)
 
-        leituras = conexao.registros_rssi
         _verificar("monitor rodou até o fim (não parou sozinho)", not parou_sozinho)
-        _verificar("leituras com RSSI em dBm e horário", bool(leituras) and all(leitura.rssi is not None for leitura in leituras))
-        if len(leituras) >= 2:
-            passos = [(b.timestamp - a.timestamp).total_seconds() for a, b in zip(leituras, leituras[1:])]
-            logging.info(
-                f"Intervalo medido: {sum(passos) / len(passos):.2f}s "
-                f"(configurado: {os.getenv('RSSI_INTERVALO', '1')}s)"
-            )
+        _verificar(f"leituras com RSSI em dBm e horário ({len(lidas)})",
+                   bool(lidas) and all(leitura.rssi is not None for leitura in lidas))
+        _verificar("RSSI mais recente consultável", bool(lidas) and conexao.rssi_atual is lidas[-1])
+        if len(lidas) >= 2:
+            passos = [(b.timestamp - a.timestamp).total_seconds() for a, b in zip(lidas, lidas[1:])]
+            media = sum(passos) / len(passos)
+            _verificar(f"intervalo medido {media:.2f}s (configurado: {conexao.intervalo_rssi:g}s)",
+                       abs(media - conexao.intervalo_rssi) <= max(0.1, 0.2 * conexao.intervalo_rssi))
         _verificar("conexão continua ativa depois das leituras", conexao.conectado)
         if fc_ativa:
-            _verificar("frequência cardíaca continuou chegando", bool(conexao.registros_frequencia))
+            registros_fc = conexao.registros_frequencia
+            _verificar("frequência cardíaca continuou chegando durante as leituras",
+                       bool(registros_fc) and registros_fc[-1].timestamp > inicio)
 
 
 async def teste_rf16(duracao: float = 30) -> None:

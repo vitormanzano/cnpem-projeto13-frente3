@@ -11,7 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "gateway"))
 
-from bluetooth.domain.erros import BluetoothIndisponivel, FalhaConexao  # noqa: E402
+from bluetooth.domain.erros import (  # noqa: E402
+    BluetoothIndisponivel, FalhaConexao, RSSIIndisponivel, ServicoIndisponivel,
+)
 from bluetooth.domain.models import EstadoConexao  # noqa: E402
 from bluetooth.reconexao import (  # noqa: E402
     INTERVALO_RECONEXAO_PADRAO,
@@ -25,9 +27,11 @@ class ConexaoFalsa:
     """Dublê de ConexaoPulseira: reproduz só o contrato que o RF05 usa.
 
     `roteiro` define o resultado de cada chamada a conectar(): "ok", "falha" ou "bluetooth".
+    `roteiro_rssi` define como termina cada monitor de RSSI: "esgota" (falhas seguidas),
+    "plataforma" (termina sem erro); sem item, roda até ser cancelado.
     """
 
-    def __init__(self, roteiro: list[str]) -> None:
+    def __init__(self, roteiro: list[str], roteiro_rssi: list[str] | None = None) -> None:
         self.endereco = "AA:BB:CC:DD:EE:FF"
         self.estado = EstadoConexao.DESCONECTADO
         self.falhar_assinatura_fc = False
@@ -36,7 +40,9 @@ class ConexaoFalsa:
         self.assinaturas_fc = 0
         self.monitores_rssi = 0
         self.monitores_rssi_cancelados = 0
+        self.derrubadas_para_reconectar = 0
         self._roteiro = list(roteiro)
+        self._roteiro_rssi = list(roteiro_rssi or [])
         self._intencional = False
         self._desconectado = asyncio.Event()
 
@@ -59,15 +65,28 @@ class ConexaoFalsa:
     async def iniciar_leitura_frequencia_cardiaca(self) -> None:
         self.assinaturas_fc += 1
         if self.falhar_assinatura_fc:
-            raise RuntimeError("característica inválida")
+            raise ServicoIndisponivel("característica Heart Rate Measurement (0x2A37) não encontrada")
+
+    async def manter_vigilancia_frequencia_cardiaca(self) -> None:
+        await asyncio.sleep(3600)
 
     async def monitorar_rssi(self) -> None:
         self.monitores_rssi += 1
+        fim = self._roteiro_rssi.pop(0) if self._roteiro_rssi else None
+        if fim == "esgota":
+            raise RSSIIndisponivel("3 falha(s) seguida(s) na leitura de RSSI")
+        if fim == "plataforma":
+            return
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
             self.monitores_rssi_cancelados += 1
             raise
+
+    async def desconectar(self, reconectar: bool = False) -> None:
+        if reconectar:
+            self.derrubadas_para_reconectar += 1
+        self.derrubar(intencional=not reconectar)
 
     async def aguardar_desconexao(self) -> None:
         await self._desconectado.wait()
@@ -217,6 +236,41 @@ def test_falha_ao_assinar_a_fc_nao_derruba_o_laco():
         conexao.derrubar()
         await aguardar(lambda: conexao.conexoes_ok == 2 and conexao.monitores_rssi == 2)
         assert conexao.assinaturas_fc == 2
+
+        conexao.derrubar(intencional=True)
+        await asyncio.wait_for(tarefa, 2.0)
+
+    asyncio.run(cenario())
+
+
+def test_falhas_seguidas_de_rssi_derrubam_e_reconectam():
+    async def cenario():
+        conexao = ConexaoFalsa(["ok", "ok"], roteiro_rssi=["esgota"])
+        tarefa = asyncio.create_task(manter_conexao(conexao, max_tentativas=3, intervalo=0))
+
+        # O monitor da primeira conexão desiste: o laço derruba e reconecta (RF04 -> RF05)
+        await aguardar(lambda: conexao.conexoes_ok == 2 and conexao.monitores_rssi == 2)
+        assert conexao.derrubadas_para_reconectar == 1
+        assert conexao.assinaturas_fc == 2  # fluxos reiniciados na reconexão
+        assert conexao.estado is EstadoConexao.CONECTADO
+
+        conexao.derrubar(intencional=True)
+        await asyncio.wait_for(tarefa, 2.0)
+
+    asyncio.run(cenario())
+
+
+def test_plataforma_sem_rssi_mantem_a_conexao():
+    async def cenario():
+        conexao = ConexaoFalsa(["ok"], roteiro_rssi=["plataforma"])
+        tarefa = asyncio.create_task(manter_conexao(conexao, max_tentativas=3, intervalo=0))
+        await aguardar(lambda: conexao.monitores_rssi == 1)
+        await asyncio.sleep(0.05)
+
+        # Reconectar não resolveria: a conexão (e a FC) seguem sem RSSI
+        assert not tarefa.done()
+        assert conexao.derrubadas_para_reconectar == 0
+        assert conexao.chamadas_conectar == 1
 
         conexao.derrubar(intencional=True)
         await asyncio.wait_for(tarefa, 2.0)

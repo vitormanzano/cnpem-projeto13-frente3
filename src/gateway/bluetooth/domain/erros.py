@@ -32,10 +32,15 @@ class BrokerIndisponivel(BrokerError):
 
 
 class RSSIIndisponivel(BluetoothError):
+    """Leitura de RSSI da conexão ativa falhou (tempo esgotado ou resposta sem RSSI)."""
     codigo = "rssi-indisponivel"
 
 
-class ServicoIndisponviel(BluetoothError):
+class PlataformaSemRSSI(RSSIIndisponivel):
+    """A plataforma não permite ler o RSSI da conexão (sem btmgmt ou sem permissão): repetir não resolve."""
+
+
+class ServicoIndisponivel(BluetoothError):
     """Serviço ou característica GATT ausente, ou notificações recusadas pela pulseira."""
     codigo = "servico-indisponivel"
 

@@ -5,7 +5,7 @@ import os
 import time
 from typing import TYPE_CHECKING
 
-from bluetooth.domain.erros import BluetoothIndisponivel, FalhaConexao, ServicoIndisponviel
+from bluetooth.domain.erros import BluetoothIndisponivel, FalhaConexao, RSSIIndisponivel, ServicoIndisponivel
 
 if TYPE_CHECKING:
     from bluetooth.conexao import ConexaoPulseira
@@ -50,7 +50,8 @@ async def manter_conexao(
     `intervalo` segundos entre elas. O contador recomeça a cada reconexão bem-sucedida, e os
     fluxos de dados são reiniciados a cada nova conexão.
 
-    Uma desconexão solicitada pelo coletor (RF10, handoff) encerra o laço sem reconectar.
+    Falhas seguidas na leitura de RSSI (RF04) contam como queda: o laço derruba a conexão e
+    reconecta. Uma desconexão solicitada pelo coletor (RF10, handoff) encerra o laço sem reconectar.
 
     Args:
         conexao: Conexão com a pulseira.
@@ -69,9 +70,9 @@ async def manter_conexao(
     await conexao.conectar()
     while True:
         conectada_desde = time.monotonic()
-        tarefas = await _reiniciar_fluxos(conexao)
+        monitor_rssi, tarefas = await _reiniciar_fluxos(conexao)
         try:
-            await conexao.aguardar_desconexao()
+            await _aguardar_fim_da_conexao(conexao, monitor_rssi)
         finally:
             await _encerrar_tarefas(tarefas)
 
@@ -124,17 +125,51 @@ async def _tentar_reconectar(conexao: "ConexaoPulseira", max_tentativas: int, in
     return 0
 
 
-async def _reiniciar_fluxos(conexao: "ConexaoPulseira") -> list[asyncio.Task]:
+async def _aguardar_fim_da_conexao(conexao: "ConexaoPulseira", monitor_rssi: asyncio.Task) -> None:
+    """Espera a conexão terminar.
+
+    Se antes disso o monitor esgotar as falhas seguidas de RSSI (RF04), derruba a conexão sem
+    marcá-la como liberação, para o laço tratar como queda e reconectar (RF05). Se o monitor
+    terminar por outro motivo (plataforma sem RSSI), a conexão segue.
+    """
+    desconexao = asyncio.create_task(conexao.aguardar_desconexao())
+    try:
+        await asyncio.wait({desconexao, monitor_rssi}, return_when=asyncio.FIRST_COMPLETED)
+        if not desconexao.done() and _desistiu_do_rssi(monitor_rssi):
+            logging.error(
+                f"Estado: {conexao.estado.value} | Erro: {RSSIIndisponivel.codigo} | "
+                f"Pulseira {conexao.endereco}: {monitor_rssi.exception()} | Derrubando a conexão para reconectar"
+            )
+            await conexao.desconectar(reconectar=True)
+        await desconexao
+    finally:
+        desconexao.cancel()
+        await asyncio.gather(desconexao, return_exceptions=True)
+
+
+def _desistiu_do_rssi(monitor_rssi: asyncio.Task) -> bool:
+    return (
+        monitor_rssi.done()
+        and not monitor_rssi.cancelled()
+        and isinstance(monitor_rssi.exception(), RSSIIndisponivel)
+    )
+
+
+async def _reiniciar_fluxos(conexao: "ConexaoPulseira") -> tuple[asyncio.Task, list[asyncio.Task]]:
     """Reinicia os fluxos de dados da pulseira, necessários a cada nova conexão.
 
-    Reassina a frequência cardíaca e retoma o monitoramento de RSSI, devolvendo a tarefa
-    do monitor. Uma falha na assinatura é registrada, mas não derruba a conexão nem o RSSI.
-    Streams que a Polar exige iniciar por comando (PMD) devem ser iniciados aqui também.
+    Reassina a frequência cardíaca e retoma o monitoramento de RSSI. Uma falha na assinatura
+    é registrada, mas não derruba a conexão nem o RSSI. Streams que a Polar exige iniciar por
+    comando (PMD) devem ser iniciados aqui também.
+
+    Returns:
+        tuple[asyncio.Task, list[asyncio.Task]]: A tarefa do monitor de RSSI, vigiada pelo laço,
+            e todas as tarefas criadas, para encerrar ao fim da conexão.
     """
     tarefas: list[asyncio.Task] = []
     try:
         await conexao.iniciar_leitura_frequencia_cardiaca()
-    except (ServicoIndisponviel, FalhaConexao) as e:  # noqa: BLE001 - nenhuma falha aqui deve encerrar o laço de reconexão
+    except (ServicoIndisponivel, FalhaConexao) as e:  # noqa: BLE001 - nenhuma falha aqui deve encerrar o laço de reconexão
         logging.error(
             f"Erro: {e.codigo} | Pulseira: {conexao.endereco} | "
             f"Frequência cardíaca não assinada, seguindo só com o RSSI: {e}"
@@ -142,8 +177,9 @@ async def _reiniciar_fluxos(conexao: "ConexaoPulseira") -> list[asyncio.Task]:
     else:
         # Só vigia o que foi assinado
         tarefas.append(asyncio.create_task(conexao.manter_vigilancia_frequencia_cardiaca()))
-    tarefas.append(asyncio.create_task(conexao.monitorar_rssi()))
-    return tarefas
+    monitor_rssi = asyncio.create_task(conexao.monitorar_rssi())
+    tarefas.append(monitor_rssi)
+    return monitor_rssi, tarefas
 
 
 async def _encerrar_tarefas(tarefas: list[asyncio.Task]) -> None:
