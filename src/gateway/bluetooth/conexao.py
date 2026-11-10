@@ -8,16 +8,19 @@ from collections.abc import Callable
 
 from bleak import BleakClient, BleakScanner
 from bleak.backends.characteristic import BleakGATTCharacteristic
-from bleak.exc import BleakDeviceNotFoundError, BleakError
+from bleak.exc import BleakCharacteristicNotFoundError, BleakDeviceNotFoundError, BleakError
 
-from bluetooth.domain.erros import BluetoothIndisponivel, FalhaConexao, RSSIIndisponivel
+from bluetooth.domain.erros import BluetoothIndisponivel, FalhaConexao, LeituraInvalida, RSSIIndisponivel, ServicoIndisponivel
 from bluetooth.domain.models import EstadoConexao, LeituraFrequenciaCardiaca, LeituraRSSI, Servico
+from bluetooth.domain.frequencia_cardiaca import interpretar_medicao
 
 
 PADRAO_RSSI = re.compile(r"RSSI (-?\d+)")
 
 INTERVALO_RSSI_PADRAO = 1.0
 TIMEOUT_BTMGMT = 2.0
+
+TEMPO_SEM_LEITURA_FC_PADRAO = 5.0
 
 CONNECT_TIMEOUT_PADRAO = 20.0
 # O bleak 1.1.1 reporta adaptador ausente ou desligado como BleakError genérico
@@ -51,25 +54,48 @@ def ler_timeout_conexao(timeout: float | None = None) -> float:
     return timeout
 
 
+def ler_tempo_sem_leitura_fc(tempo: float | None = None) -> float:
+    """Resolve o tempo sem FC que gera o aviso em log (RF03).
+
+    Args:
+        tempo (float | None): Segundos. Se omitido, é lido da variável de ambiente
+            FC_TEMPO_SEM_LEITURA (padrão de 5 s).
+
+    Raises:
+        ValueError: Se o tempo não for positivo ou a variável de ambiente não for um número.
+    """
+    if tempo is None:
+        tempo = float(os.getenv("FC_TEMPO_SEM_LEITURA", TEMPO_SEM_LEITURA_FC_PADRAO))
+    if tempo <= 0:
+        raise ValueError("FC_TEMPO_SEM_LEITURA deve ser maior que zero (em segundos).")
+    return tempo
+
+
 class ConexaoPulseira:
     """Conexão GATT com a pulseira, mantida enquanto o coletor for o responsável por ela."""
 
     def __init__(self, endereco: str, timeout_conexao: float | None = None, 
-                 ao_atualizar: TratadorLeitura | None = None) -> None:
+                 ao_atualizar: TratadorLeitura | None = None,
+                 tempo_sem_leitura_fc: float | None = None) -> None:
         """
         Args:
             endereco (str): Endereço MAC (Linux) ou UUID (macOS) da pulseira.
             timeout_conexao (float | None): Tempo limite da conexão em segundos. Se omitido,
                 é lido da variável de ambiente CONNECT_TIMEOUT (padrão de 20 s).
+            tempo_sem_leitura_fc (float | None): Segundos sem frequência cardíaca, com a conexão ativa,
+                até registar o aviso em log. Se omitido, é lido da variável de ambiente
+                FC_TEMPO_SEM_LEITURA (padrão de 5 s)
         """
 
         self.endereco = endereco
         self.timeout_conexao = ler_timeout_conexao(timeout_conexao)
+        self.tempo_sem_leitura_fc = ler_tempo_sem_leitura_fc(tempo_sem_leitura_fc)
         self.ao_ler: Callable[[LeituraRSSI], None] | None = None
         self._estado = EstadoConexao.DESCONECTADO
         self._client: BleakClient | None = None
         self._desconectado = asyncio.Event()
         self._encerramento_solicitado = False
+        self._leitura_fc_recebida = asyncio.Event()
         self._leituras_frequencia_cardiaca: deque[LeituraFrequenciaCardiaca] = deque(
             maxlen = TAMANHO_MAXIMO_DE_LEITURAS_BUFFER
         )
@@ -247,10 +273,21 @@ class ConexaoPulseira:
 
         Raises:
             FalhaConexao: se a pulseira não estiver conectada.
+            ServicoIndisponivel: Se a pulseira não tiver a característica ou recusar as notificações.
         """
-        await self.client.start_notify(
-            CARACTERISTICA_FREQUENCIA_CARDIACA_UUID, self._ao_receber_frequencia_cardiaca
-        )
+        try:
+            await self.client.start_notify(
+                CARACTERISTICA_FREQUENCIA_CARDIACA_UUID, self._ao_receber_frequencia_cardiaca
+            )
+        except BleakCharacteristicNotFoundError as e:
+            raise ServicoIndisponviel(
+                "característica Heart Rate Measurement (0x2A37) não encontrada na pulseira"
+            ) from e
+        except BleakError as e:
+            if not self.conectado:
+                raise FalhaConexao(f"Pulseira {self.endereco} caiu ao assinar a frequência cardíaca") from e
+            raise ServicoIndisponivel(f"notificações da 0x2A37 recusadas: {e}") from e
+
 
 
     async def parar_leitura_frequencia_cardiaca(self) -> None:
@@ -258,14 +295,48 @@ class ConexaoPulseira:
         await self.client.stop_notify(CARACTERISTICA_FREQUENCIA_CARDIACA_UUID)
 
 
-    def _ao_receber_frequencia_cardiaca(self, _caracteristica: BleakGATTCharacteristic, data: bytearray) -> None:
-        flags = data[0]
-        if flags & 0x01:
-            bpm = int.from_bytes(data[1:3], "little")
-        else:
-            bpm = data[1]
+    async def manter_vigilancia_frequencia_cardiaca(self) -> None:
+        """Registra em log quando a frequência cardíaca para de chegar com a conexão ativa.
 
-        self._leituras_frequencia_cardiaca.append(LeituraFrequenciaCardiaca(bpm = bpm))
+        O aviso sai uma vez por silência, e outra quando as leituras volta, para não repetir a cada
+        `tempo_sem_leitura_fc`. Leituras descartadas não contam como recebidas.
+        """
+        em_silencio = False
+        while self.conectado:
+            self._leitura_fc_recebida.clear()
+            try:
+                await asyncio.wait_for(self._leitura_fc_recebida.wait(), self.tempo_sem_leitura_fc)
+            except TimeoutError:
+                # A queda também esgota o prazo; quem registra a queda é o _marcar_desconectado
+                if self.conectado and not em_silencio:
+                    em_silencio = True
+                    logging.warning(
+                        f"Estado: {self._estado.value} | Pulseira: {self.endereco} | "
+                        f"Nenhuma leitura de frequência cardíaca há {self.tempo_sem_leitura_fc:g}s"
+                    )
+                continue
+            if em_silencio:
+                em_silencio = False
+                logging.info(f"Pulseira: {self.endereco} | Leituras de frequência cardíaca retomadas")
+
+
+    def _ao_receber_frequencia_cardiaca(self, _caracteristica: BleakGATTCharacteristic, dados: bytearray) -> None:
+        """Callback síncrono do bleak: só interpreta, guarda e sinaliza"""
+        try:
+            leitura = interpretar_medicao(dados)
+        except LeituraInvalida as e:
+            logging.warning(
+                f"Erro: {e.codigo} | Pulseira: {self.endereco} | "
+                f"Leitura de frequência cardíaca descartada: {e} | Dados: {dados.hex()}"
+            )
+            return
+
+        self._leituras_frequencia_cardiaca.append(leitura)
+        self._leitura_fc_recebida.set()
+        logging.debug(
+            f"Pulseira: {self.endereco} | FC {leitura.bpm} | RR {list(leitura.intervalos_rr_ms)} ms"
+        )
+
 
 
     async def ler_rssi(self) -> LeituraRSSI:

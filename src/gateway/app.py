@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 from coletor.coletor import Coletor, identificador_coletor
 from coordenador.coordenador import Coordenador
-from gateway.bluetooth.scanner import ler_endereco_pulseira
+from bluetooth.scanner import ler_endereco_pulseira
 from mqtt.conexao import ConexaoBroker
 
 logging.basicConfig(

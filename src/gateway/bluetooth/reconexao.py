@@ -5,7 +5,7 @@ import os
 import time
 from typing import TYPE_CHECKING
 
-from bluetooth.domain.erros import BluetoothIndisponivel, FalhaConexao
+from bluetooth.domain.erros import BluetoothIndisponivel, FalhaConexao, ServicoIndisponviel
 
 if TYPE_CHECKING:
     from bluetooth.conexao import ConexaoPulseira
@@ -69,11 +69,11 @@ async def manter_conexao(
     await conexao.conectar()
     while True:
         conectada_desde = time.monotonic()
-        tarefa_rssi = await _reiniciar_fluxos(conexao)
+        tarefas = await _reiniciar_fluxos(conexao)
         try:
             await conexao.aguardar_desconexao()
         finally:
-            await _encerrar_tarefa(tarefa_rssi)
+            await _encerrar_tarefas(tarefas)
 
         if conexao.desconexao_intencional:
             logging.info(
@@ -124,23 +124,29 @@ async def _tentar_reconectar(conexao: "ConexaoPulseira", max_tentativas: int, in
     return 0
 
 
-async def _reiniciar_fluxos(conexao: "ConexaoPulseira") -> asyncio.Task:
+async def _reiniciar_fluxos(conexao: "ConexaoPulseira") -> list[asyncio.Task]:
     """Reinicia os fluxos de dados da pulseira, necessários a cada nova conexão.
 
     Reassina a frequência cardíaca e retoma o monitoramento de RSSI, devolvendo a tarefa
     do monitor. Uma falha na assinatura é registrada, mas não derruba a conexão nem o RSSI.
     Streams que a Polar exige iniciar por comando (PMD) devem ser iniciados aqui também.
     """
+    tarefas: list[asyncio.Task] = []
     try:
         await conexao.iniciar_leitura_frequencia_cardiaca()
-    except Exception as e:  # noqa: BLE001 - nenhuma falha aqui deve encerrar o laço de reconexão
+    except (ServicoIndisponviel, FalhaConexao) as e:  # noqa: BLE001 - nenhuma falha aqui deve encerrar o laço de reconexão
         logging.error(
-            f"Pulseira {conexao.endereco} | Não foi possível assinar a frequência cardíaca "
-            f"[{type(e).__name__}]: {e}"
+            f"Erro: {e.codigo} | Pulseira: {conexao.endereco} | "
+            f"Frequência cardíaca não assinada, seguindo só com o RSSI: {e}"
         )
-    return asyncio.create_task(conexao.monitorar_rssi())
+    else:
+        # Só vigia o que foi assinado
+        tarefas.append(asyncio.create_task(conexao.manter_vigilancia_frequencia_cardiaca()))
+    tarefas.append(asyncio.create_task(conexao.monitorar_rssi()))
+    return tarefas
 
 
-async def _encerrar_tarefa(tarefa: asyncio.Task) -> None:
-    tarefa.cancel()
-    await asyncio.gather(tarefa, return_exceptions=True)
+async def _encerrar_tarefas(tarefas: list[asyncio.Task]) -> None:
+    for tarefa in tarefas:
+        tarefa.cancel()
+    await asyncio.gather(*tarefas, return_exceptions=True)

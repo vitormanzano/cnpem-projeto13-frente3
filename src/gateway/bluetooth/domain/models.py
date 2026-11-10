@@ -42,4 +42,5 @@ class Servico:
 @dataclass(frozen=True)
 class LeituraFrequenciaCardiaca:
     bpm: int
+    intervalos_rr_ms: tuple[float, ...] = () # Vazio quando a pulseira não envia RR
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
