@@ -400,9 +400,10 @@ async def teste_rf11(manual: bool = False) -> None:
                 continue
             numero += 1
             try:
+                # sinal-de-vida porque não tem campo obrigatório: o "eco" extra passa no de_json
                 await conexao.publicar(
                     topico_eco,
-                    Mensagem(tipo=TipoMensagem.ESTADO_PULSEIRA, origem=cliente_id, conteudo={"eco": numero}),
+                    Mensagem(tipo=TipoMensagem.SINAL_DE_VIDA, origem=cliente_id, conteudo={"eco": numero}),
                 )
             except BrokerIndisponivel as e:
                 logging.warning(f"Eco {numero} não publicado: {e}")
@@ -427,20 +428,26 @@ async def teste_rf11(manual: bool = False) -> None:
 
 
 async def teste_rf12(simular_queda: bool = True) -> None:
-    """RF12 - Presença do coletor, conferida por um espião em coletores/{coletor}/presenca.
+    """RF12 - Presença do coletor, conferida por um espião em coletores/{coletor}/presenca e /sinal-de-vida.
 
-    Cobre: online retido ao conectar, sinal de vida, pulseira atendida, last will na queda (simulada
-    cortando o TCP), offline no encerramento e nada publicado depois dele.
+    Cobre: online retido ao conectar, sinal de vida em tópico próprio, pulseira atendida, last will na
+    queda (simulada cortando o TCP), offline no encerramento e nada publicado depois dele.
     """
     cliente_id = identificador_coletor()
     recebidas: list[Mensagem] = []
-    espiao = await _espiao(Topicos.presenca_coletor(cliente_id), recebidas=recebidas)
+    espiao = await _espiao(
+        Topicos.presenca_coletor(cliente_id), Topicos.sinal_de_vida_coletor(cliente_id), recebidas=recebidas,
+    )
     conexao = ConexaoBroker(cliente_id=cliente_id)
     presenca = PresencaColetor(conexao)  # antes de conectar: registra a última vontade
     intervalo = presenca.intervalo
 
+    def do_tipo(tipo: TipoMensagem) -> list[Mensagem]:
+        return [mensagem for mensagem in recebidas if mensagem.tipo is tipo]
+
     def ultimo(campo: str) -> str | None:
-        return recebidas[-1].conteudo.get(campo) if recebidas else None
+        presencas = do_tipo(TipoMensagem.PRESENCA)
+        return presencas[-1].conteudo.get(campo) if presencas else None
 
     tarefas = [asyncio.create_task(espiao.manter_conexao())]
     try:
@@ -456,14 +463,16 @@ async def teste_rf12(simular_queda: bool = True) -> None:
         ]
         _verificar("online ao conectar",
                    await _aguardar(lambda: ultimo("estado") == EstadoPresenca.ONLINE.value, timeout=15))
-        antes = len(recebidas)
+        antes = len(do_tipo(TipoMensagem.SINAL_DE_VIDA))
         await asyncio.sleep(intervalo * 2 + 1)
-        _verificar(f"sinal de vida a cada {intervalo:g}s", len(recebidas) - antes >= 2)
-        mensagem = recebidas[-1]
+        sinais = do_tipo(TipoMensagem.SINAL_DE_VIDA)
+        _verificar(f"sinal de vida a cada {intervalo:g}s, em tópico próprio", len(sinais) - antes >= 2)
+        _verificar("sinal de vida sem campos", bool(sinais) and sinais[-1].conteudo == {})
+        mensagem = do_tipo(TipoMensagem.PRESENCA)[-1]
         _verificar("mensagem tem coletor, estado, pulseira e timestamp",
                    mensagem.origem == cliente_id and {"estado", "pulseira"} <= mensagem.conteudo.keys())
 
-        await presenca.atualiar_pulseira(PULSEIRA_FICTICIA)
+        await presenca.atualizar_pulseira(PULSEIRA_FICTICIA)
         _verificar("troca de pulseira publicada na hora",
                    await _aguardar(lambda: ultimo("pulseira") == PULSEIRA_FICTICIA, timeout=2))
 
@@ -489,6 +498,7 @@ async def teste_rf15() -> None:
     """RF15 - Formato, tópicos e QoS padronizados. Não usa BLE nem broker."""
     tabela = {  # tipo: (QoS, retida), conforme a tabela do RF15
         TipoMensagem.PRESENCA:            (1, True),
+        TipoMensagem.SINAL_DE_VIDA:       (0, False),
         TipoMensagem.ESTADO_PULSEIRA:     (0, False),
         TipoMensagem.LIBERACAO_POSSE:     (1, False),
         TipoMensagem.FREQUENCIA_CARDIACA: (0, False),
@@ -511,20 +521,24 @@ async def teste_rf15() -> None:
     _verificar("timestamp em UTC", datetime.fromisoformat(dados["timestamp"]).utcoffset() == timedelta(0))
     _verificar("ida e volta preserva a mensagem", Mensagem.de_json(original.para_json()) == original)
 
-    logging.info("Os 3 avisos 'Mensagem descartada' a seguir são esperados")
+    logging.info("Os 4 avisos 'Mensagem descartada' a seguir são esperados")
     _verificar("versão incompatível é descartada",
                Mensagem.de_json(json.dumps({**dados, "versao": VERSAO_FORMATO + 1})) is None)
     _verificar("JSON inválido é descartado", Mensagem.de_json("{não é json") is None)
     _verificar("campo obrigatório ausente é descartado", Mensagem.de_json(json.dumps({"versao": VERSAO_FORMATO})) is None)
+    _verificar("conteudo sem os campos do tipo é descartado",
+               Mensagem.de_json(json.dumps({**dados, "tipo": "handoff", "conteudo": {"pulseira": "AA"}})) is None)
 
     hierarquia = [
-        (Topicos.presenca_coletor("c1"),      "coletores/c1/presenca"),
-        (Topicos.estado_rssi("c1", "AA"),     "coletores/c1/pulseiras/AA"),
-        (Topicos.liberacao_posse("AA"),       "pulseiras/AA/liberacao"),
-        (Topicos.frequencia_cardiaca("AA"),   "pulseiras/AA/frequencia-cardiaca"),
-        (Topicos.estado_posse("AA"),          "pulseiras/AA/posse"),
-        (Topicos.handoff("AA"),               "pulseiras/AA/handoff"),
-        (Topicos.presenca_coordenador(),      "coordenador/presenca"),
+        (Topicos.presenca_coletor("c1"),          "coletores/c1/presenca"),
+        (Topicos.sinal_de_vida_coletor("c1"),     "coletores/c1/sinal-de-vida"),
+        (Topicos.estado_rssi("c1", "AA"),         "coletores/c1/pulseiras/AA"),
+        (Topicos.liberacao_posse("AA"),           "pulseiras/AA/liberacao"),
+        (Topicos.frequencia_cardiaca("AA"),       "pulseiras/AA/frequencia-cardiaca"),
+        (Topicos.estado_posse("AA"),              "pulseiras/AA/posse"),
+        (Topicos.handoff("AA"),                   "pulseiras/AA/handoff"),
+        (Topicos.presenca_coordenador(),          "coordenador/presenca"),
+        (Topicos.sinal_de_vida_coordenador(),     "coordenador/sinal-de-vida"),
     ]
     for gerado, documentado in hierarquia:
         _verificar(f"tópico {documentado}", gerado == documentado)
@@ -532,6 +546,7 @@ async def teste_rf15() -> None:
     _verificar("extrai coletor e pulseira do estado/RSSI",
                Topicos.extrair_estado_rssi("coletores/c1/pulseiras/AA") == ("c1", "AA"))
     _verificar("extrai a pulseira da posse", Topicos.extrair_estado_posse("pulseiras/AA/posse") == "AA")
+    _verificar("extrai a pulseira do handoff", Topicos.extrair_handoff("pulseiras/AA/handoff") == "AA")
     _verificar("tópico de outro tipo não é extraído", Topicos.extrair_estado_rssi("coletores/c1/presenca") is None)
     _verificar("estados na linguagem ubíqua",
                {e.value for e in EstadoConexao} == {"conectado", "desconectado", "conexao-fraca", "nao-encontrado"})

@@ -70,24 +70,30 @@ class Coletor:
                 if Topicos.extrair_estado_posse(topico) == self.endereco:
                     await self._tratar_posse(mensagem.conteudo.get("coletor"))
             case TipoMensagem.HANDOFF:
-                if (mensagem.conteudo.get("pulseira") == self.endereco
+                if (Topicos.extrair_handoff(topico) == self.endereco
                         and mensagem.conteudo.get("origem") == self.broker.cliente_id):
-                    await self._liberar("handoff")
+                    await self._liberar("handoff", handoff=mensagem.conteudo.get("id"))
                     self._iniciar_varredura() # Volta a disputar como favorito
 
 
     async def _tratar_posse(self, dono: str | None) -> None:
-        """Posse minha: conecta. Liberada: começa a varrer. Com outro coletor: para de varrer"""
+        """Posse minha: conecta. Liberada: começa a varrer. Com outro coletor: para de varrer.
+
+        A pulseira atendida na presença (RF12) segue a posse publicada pelo coordenador, que é
+        quem concede e libera a posse.
+        """
         if dono == self.broker.cliente_id:
             if self._sessao is None or self._sessao.done():
                 logging.info(f"Posse recebida | Pulseira: {self.endereco}")
                 await self._parar_varredura()
                 self._sessao = asyncio.create_task(self._manter_sessao())
+            await self.presenca.atualizar_pulseira(self.endereco)
             return
         if self._sessao is not None:
             logging.warning(f"Posse perdida sem handoff | Pulseira: {self.endereco} | Dono: {dono}")
             await self._desconectar()
-                    
+        await self.presenca.atualizar_pulseira(None)
+
         if dono is None:
             self._iniciar_varredura() # Posse liberada
         else:
@@ -105,14 +111,21 @@ class Coletor:
             self._iniciar_varredura()
 
 
-    async def _liberar(self, motivo: str) -> None:
+    async def _liberar(self, motivo: str, handoff: str | None = None) -> None:
         """Desconecta, publica o estado desconectado e só depois a liberação: o coordenador
         não pode conceder a posse a outro coletor enquanto este ainda estiver conectado.
+
+        Args:
+            motivo (str): Motivo registrado no log.
+            handoff (str | None): Id do comando de handoff que pediu a liberação (RF06).
         """
-        logging.info(f"Liberando a pulseira {self.endereco} | Motivo: {motivo}")
+        logging.info(
+            f"Liberando a pulseira {self.endereco} | Motivo: {motivo}"
+            + (f" | Handoff: {handoff}" if handoff else "")
+        )
         await self._desconectar()
         await self.estado_rssi.publicar_pendentes()
-        await self._publicar_liberacao()
+        await self._publicar_liberacao(handoff)
 
 
     async def _desconectar(self) -> None:
@@ -127,13 +140,15 @@ class Coletor:
         self._sessao = None
 
 
-    async def _publicar_liberacao(self) -> None:
+    async def _publicar_liberacao(self, handoff: str | None = None) -> None:
+        """Publica a liberação da posse; com `handoff`, ela responde a esse comando (RF06, RF15)."""
+        conteudo = {"pulseira": self.endereco}
+        if handoff is not None:
+            conteudo["handoff"] = handoff
         mensagem = Mensagem(
             tipo=TipoMensagem.LIBERACAO_POSSE,
             origem=self.broker.cliente_id,
-            conteudo={
-                "pulseira": self.endereco,
-            }
+            conteudo=conteudo,
         )
         try:
             await self.broker.publicar(Topicos.liberacao_posse(self.endereco), mensagem)

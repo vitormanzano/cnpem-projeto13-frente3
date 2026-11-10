@@ -67,17 +67,22 @@ class EstadoRssiColetor:
     
 
     def mensagem(self, leitura: LeituraRSSI) -> Mensagem:
-        """Coletor (origem) e timestamp da leitura vão no envelope"""
+        """Coletor (origem) e timestamp da leitura vão no envelope.
+
+        `amostras` só existe na varredura (RF15, RF18): a conexão ativa lê um RSSI por vez.
+        """
+        conteudo = {
+            "pulseira": leitura.endereco,
+            "estado": leitura.estado.value,
+            "rssi": leitura.rssi,
+        }
+        if leitura.amostras is not None:
+            conteudo["amostras"] = leitura.amostras
         return Mensagem(
             tipo=TipoMensagem.ESTADO_PULSEIRA,
             origem=self.broker.cliente_id,
             timestamp=leitura.timestamp,
-            conteudo={
-                "pulseira": leitura.endereco,
-                "estado": leitura.estado.value,
-                "rssi": leitura.rssi,
-                "amostras": leitura.amostras
-            },
+            conteudo=conteudo,
         )
 
 

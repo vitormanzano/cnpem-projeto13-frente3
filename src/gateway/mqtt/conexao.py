@@ -161,7 +161,7 @@ class ConexaoBroker:
 
 
     async def _tratar_mensagem(self, mensagem: aiomqtt.Message) -> None:
-        conteudo = Mensagem.de_json(mensagem.payload)
+        conteudo = Mensagem.de_json(mensagem.payload, mensagem.topic.value)
         if conteudo is None or self.ao_receber is None:
             return
 

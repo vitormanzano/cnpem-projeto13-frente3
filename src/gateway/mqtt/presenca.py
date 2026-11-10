@@ -78,7 +78,7 @@ class PresencaColetor:
             logging.info(f"Presença: {EstadoPresenca.OFFLINE.value} | Coletor: {self.broker.cliente_id} ")
 
 
-    async def  atualiar_pulseira(self, pulseira: str | None = None) -> None:
+    async def  atualizar_pulseira(self, pulseira: str | None = None) -> None:
         """Atualiza a pulseira atendida e publica a presença na hora.
 
         Args: 
@@ -91,33 +91,44 @@ class PresencaColetor:
         self.pulseira = pulseira
         logging.info(f"Presença | Coletor: {self.broker.cliente_id} | Pulseira: {pulseira or 'Nenhuma' } ")
         if not self._encerrada:
-            """ Se falhar, o próximo sinal de vida manda a pulseira atualizada."""
+            # Se falhar, o broker caiu: a reconexão republica a presença com a pulseira atual
             await self._publicar(EstadoPresenca.ONLINE)
 
 
     async def manter_sinal_de_vida(self) -> None:
-        """Publica  a presença a cada `intervalo` segundos, até o encerramento ou cancelamento.
+        """Publica o sinal de vida em tópico próprio, sem retenção, a cada `intervalo` segundos (RF12),
+        até o encerramento ou cancelamento.
 
-        Sem conexão com o broker o sinal é pulado; a falha ja é registrada pela ConexaoBroker
-        e a presença é republicada na conexão.
+        Sem conexão com o broker o sinal é pulado; a falha já é registrada pela ConexaoBroker.
         """
         while not self._encerrada:
             await asyncio.sleep(self.intervalo)
             if self._encerrada or not self.broker.conectado:
                 continue
 
-            if await self._publicar(EstadoPresenca.ONLINE):
+            sinal = Mensagem(tipo=TipoMensagem.SINAL_DE_VIDA, origem=self.broker.cliente_id, conteudo={})
+            try:
+                await self.broker.publicar(Topicos.sinal_de_vida_coletor(self.broker.cliente_id), sinal)
                 logging.debug(f"Sinal de vida | Coletor: {self.broker.cliente_id} ")
+            except BrokerIndisponivel as e:
+                logging.warning(
+                    f"Erro: {BrokerIndisponivel.codigo} | Coletor: {self.broker.cliente_id} | "
+                    f"Sinal de vida não publicado: {e}"
+                )
 
 
     def mensagem(self, estado: EstadoPresenca) -> Mensagem:
-        """Monta a mensagem de presença. O identificador do coletor (origem) e o timestamp vão no envelope."""
+        """Monta a mensagem de presença. O identificador do coletor (origem) e o timestamp vão no envelope.
+
+        Offline não atende pulseira: no encerramento a liberação já saiu antes (RF10), e a
+        última vontade não sabe qual era a pulseira.
+        """
         return Mensagem(
             tipo=TipoMensagem.PRESENCA,
             origem=self.broker.cliente_id,
             conteudo={
                 "estado": estado.value,
-                "pulseira": self.pulseira
+                "pulseira": self.pulseira if estado is EstadoPresenca.ONLINE else None,
             },
         )
 
@@ -140,14 +151,7 @@ class PresencaColetor:
         O timestamp é o do registro, não o da queda: para saber quando o coletor caiu,
         o coordenador deve usar o horário de recebimento.
         """
-        mensagem = Mensagem(
-            tipo=TipoMensagem.PRESENCA,
-            origem=self.broker.cliente_id,
-            conteudo={
-                "estado": EstadoPresenca.OFFLINE.value,
-                "pulseira": None
-            },
-        )
+        mensagem = self.mensagem(EstadoPresenca.OFFLINE)
         config = mensagem.config_entrega
         return aiomqtt.Will(
                 topic=self.topico,
