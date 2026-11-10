@@ -7,7 +7,7 @@ from bluetooth.conexao import ConexaoPulseira
 from bluetooth.domain.classificacao_conexao import ClassificacaoConexao
 from bluetooth.domain.erros import BluetoothIndisponivel, BrokerIndisponivel, FalhaConexao
 from bluetooth.domain.models import EstadoConexao
-from bluetooth.reconexao import manter_conexao
+from bluetooth.reconexao import ler_configuracao_reconexao, manter_conexao
 from bluetooth.scanner import VarreduraPulseira
 from mqtt.estado_rssi import EstadoRssiColetor
 from mqtt.domain.models import Mensagem, TipoMensagem
@@ -31,18 +31,24 @@ class Coletor:
     """Coletor BLE: Realiza todas as ações que um coletor precisa."""
 
     def __init__(self, broker: ConexaoBroker, endereco_pulseira: str) -> None:
-        self.broker                          = broker
-        self.endereco                        = endereco_pulseira
-        self.presenca                        = PresencaColetor(broker)    # antes de conectar: registra a última vontade
-        self.estado_rssi                     = EstadoRssiColetor(broker)  # O online sai antes do RSSI
-        self._classificacao                  = ClassificacaoConexao()     # Um estado só, da varredura à conexão (RF08)
-        self.varredura                       = VarreduraPulseira(endereco_pulseira, classificacao=self._classificacao)
-        self.varredura.ao_ler                = self.estado_rssi.registrar # Cada leitura entra na fila de publicação
-        self.conexao                         = ConexaoPulseira(endereco_pulseira, classificacao=self._classificacao)
-        self.conexao.ao_atualizar            = self.estado_rssi.registrar # Estado e RSSI da conexão, inclusive o desconectado (RF10)
-        self._varredura: asyncio.Task | None = None
-        self._sessao: asyncio.Task | None    = None                       # Conexão enquanto tiver a psse
-        self.broker.ao_receber               = self.ao_receber
+        """
+        Raises:
+            ValueError: Se a configuração da conexão ou da reconexão for inválida
+        """
+        self.broker                                           = broker
+        self.endereco                                         = endereco_pulseira
+        self.presenca                                         = PresencaColetor(broker)    # antes de conectar: registra a última vontade
+        self.estado_rssi                                      = EstadoRssiColetor(broker)  # O online sai antes do RSSI
+        self._classificacao                                   = ClassificacaoConexao()     # Um estado só, da varredura à conexão (RF08)
+        self.varredura                                        = VarreduraPulseira(endereco_pulseira, classificacao=self._classificacao)
+        self.varredura.ao_ler                                 = self.estado_rssi.registrar # Cada leitura entra na fila de publicação
+        self.conexao                                          = ConexaoPulseira(endereco_pulseira, classificacao=self._classificacao)
+        self.conexao.ao_atualizar                             = self.estado_rssi.registrar # Estado e RSSI da conexão, inclusive o desconectado (RF10)
+        self._varredura: asyncio.Task | None                  = None
+        self._sessao: asyncio.Task | None                     = None                       # Conexão enquanto tiver a psse
+        self.broker.ao_receber                                = self.ao_receber
+        # Lida aqui e não ao receber a posse: inválida, derrubaria só a sessão e a posse ficaria presa
+        self._tentativas_reconexao, self._intervalo_reconexao = ler_configuracao_reconexao()
 
 
     @property
@@ -90,10 +96,11 @@ class Coletor:
     async def _manter_sessao(self) -> None:
         """Roda em tarefa própria: conectar pode levar até CONNECT_TIMEOUT e não pode travar o MQTT."""
         try:
-            await manter_conexao(self.conexao)
+            await manter_conexao(self.conexao, self._tentativas_reconexao, self._intervalo_reconexao)
         except(FalhaConexao, BluetoothIndisponivel) as e:
             logging.error(f"Pulseira: {self.endereco} | Conexão perdida, devolvendo a posse: {e}")
             self._sessao = None
+            await self.estado_rssi.publicar_pendentes()
             await self._publicar_liberacao()
             self._iniciar_varredura()
 
