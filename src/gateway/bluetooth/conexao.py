@@ -236,7 +236,7 @@ class ConexaoPulseira:
         servicos = [
             Servico(
             uuid=service.uuid,
-            descricao=service.description,
+            descricao=DESCRICOES_SERVICOS_POLAR.get(service.uuid.lower(), service.description),
             )
         for service in self._client.services
         ]

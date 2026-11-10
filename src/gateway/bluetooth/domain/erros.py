@@ -57,3 +57,4 @@ class SemLeitura(LeituraInvalida):
 
 class SemContato(LeituraInvalida):
     """Flags da medição indicam ausência de contato com a pele"""
+    codigo = "sem-contato"

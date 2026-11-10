@@ -148,7 +148,7 @@ async def localizar_pulseira(endereco: str, timeout: float | None = None) -> Pul
     Raises: 
         ValueError: Se o tempo limite for inválido.
     """
-    timout = ler_duracao_varredura(timeout);
+    timeout = ler_duracao_varredura(timeout)
     encontrada = asyncio.Event()
     pulseira: Pulseira | None = None
 
@@ -165,7 +165,7 @@ async def localizar_pulseira(endereco: str, timeout: float | None = None) -> Pul
             await asyncio.wait_for(encontrada.wait(), timeout)
         except asyncio.TimeoutError:
             logging.warning(
-                    f"Estado: {EstadoConexao.NAO_ENCONTRADO.value} | Erro: {PulseiraNaoEncontrada.codigo} |"
+                    f"Estado: {EstadoConexao.NAO_ENCONTRADO.value} | Erro: {PulseiraNaoEncontrada.codigo} | "
                     f"Pulseira {endereco} não encontrada em {timeout:g}s"
                 )
             raise PulseiraNaoEncontrada(f"Pulseira {endereco} não encontrada em {timeout:g}s") from None

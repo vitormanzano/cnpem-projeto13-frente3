@@ -17,7 +17,9 @@ from bluetooth.domain.erros import (
 )
 from bluetooth.domain.models import EstadoConexao, LeituraFrequenciaCardiaca, LeituraRSSI
 from bluetooth.reconexao import manter_conexao
-from bluetooth.scanner import VarreduraPulseira, find_all_local_devices
+from bluetooth.scanner import (
+    VarreduraPulseira, find_all_local_devices, ler_duracao_varredura, ler_endereco_pulseira, localizar_pulseira,
+)
 from coletor.coletor import identificador_coletor
 from mqtt.conexao import ConexaoBroker
 from mqtt.domain.models import CONFIG_POR_TIPO, VERSAO_FORMATO, EstadoPresenca, Mensagem, TipoMensagem
@@ -137,7 +139,7 @@ async def teste_rf01(duracao: float | None = None) -> None:
         print("Nenhum dispositivo BLE encontrado. Confira se há dispositivos ligados e anunciando ao alcance do coeltor.")
         return
 
-    print(f"{'Endereco': < 17} {'RSSI':>8} Nome")
+    print(f"{'Endereco':<17} {'RSSI':>8} Nome")
     for dispositivo in dispositivos:
         print(f"{dispositivo.endereco:<17} {dispositivo.rssi:>4} dBm {dispositivo.nome}")
 
@@ -145,6 +147,22 @@ async def teste_rf01(duracao: float | None = None) -> None:
     _verificar("cada dispositivo aparece uma única vez", len(enderecos) == len(set(enderecos)))
     if alvo := os.getenv("TARGET_ADDRESS"):
         _verificar(f"pulseira {alvo} na lista", alvo.upper() in enderecos)
+
+
+async def teste_rf02() -> None:
+    """RF02 - Localizar a pulseira: para no primeiro anúncio; endereço inexistente gera nao-encontrado."""
+    endereco = ler_endereco_pulseira(_config("TARGET_ADDRESS"))
+    limite = ler_duracao_varredura()
+    inicio = time.monotonic()
+    pulseira = await localizar_pulseira(endereco)
+    duracao = time.monotonic() - inicio
+    logging.info(f"Pulseira: {pulseira.endereco} | Nome: {pulseira.nome} | RSSI: {pulseira.rssi} dBm")
+    _verificar(f"parou no primeiro anúncio ({duracao:.1f}s, limite {limite:g}s)", duracao < limite)
+    try:
+        await localizar_pulseira(ENDERECO_INEXISTENTE, timeout=5)
+        _verificar("endereço inexistente gera pulseira-nao-encontrada", False)
+    except PulseiraNaoEncontrada as e:
+        _verificar(f"endereço inexistente gera {e.codigo}", True)
 
 
 async def teste_rf03() -> None:
@@ -241,6 +259,7 @@ async def teste_rf16(duracao: float = 30) -> None:
         )
 
         monitor = asyncio.create_task(conexao.monitorar_rssi())
+        vigilancia = asyncio.create_task(conexao.manter_vigilancia_frequencia_cardiaca())
         ultima = None
         recebidas = 0
         limite = time.monotonic() + duracao
@@ -251,7 +270,7 @@ async def teste_rf16(duracao: float = 30) -> None:
                 ultima = registros[-1]
                 recebidas += 1
                 logging.info(f"FC {ultima.bpm} bpm às {ultima.timestamp:%H:%M:%S.%f}")
-        await _encerrar(monitor)
+        await _encerrar(monitor, vigilancia)
         if conexao.conectado:
             await conexao.parar_leitura_frequencia_cardiaca()
 
@@ -579,9 +598,9 @@ async def teste_rf09(duracao: float = 60) -> None:
 async def main() -> None:
     """Descomente UM teste por vez."""
     try:
-        devices = await find_all_local_devices()
-        print(devices)
-        # await teste_rf15()                  # mensagens padronizadas: sem BLE e sem broker
+        # await teste_rf01()                # dispositivos BLE ao alcance
+        # await teste_rf02()                # localizar a pulseira
+        # await teste_rf15()                 # mensagens padronizadas: sem BLE e sem broker
         # await teste_rf11()                # broker, sem BLE (manual=True para docker stop/start)
         # await teste_rf12()                # presença, sinal de vida e last will
         # await teste_rf03()                # conectar à pulseira
@@ -593,6 +612,7 @@ async def main() -> None:
         # await teste_rf05()                # reconexão: provoque quedas (desconectar_apos=15 testa a intencional)
         # await teste_rf09()                # BLE + broker
         # await espiar("#")                 # num segundo terminal: tudo o que passa no broker
+        pass                                # mantém o bloco válido com todos os testes comentados
     except GatewayError as e:
         logging.error(f"Erro: {e.codigo} | {e}")
         _falhas.append(f"teste interrompido por {e.codigo}")
