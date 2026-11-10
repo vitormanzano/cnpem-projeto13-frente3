@@ -24,6 +24,11 @@ CONNECT_TIMEOUT_PADRAO = 20.0
 TRECHOS_ADAPTADOR_INDISPONIVEL = ("Bluetooth adapters found", "org.bluez.Error.NotReady")
 
 CARACTERISTICA_FREQUENCIA_CARDIACA_UUID = "00002a37-0000-1000-8000-00805f9b34fb" # Heart Rate Measurement (0x2A37)
+# Serviços proprietários da Polar sairiam como "Unknown"
+DESCRICOES_SERVICOS_POLAR = {
+    "fb005c80-02e7-f387-1cad-8acd2d8df0c8": "Polar Measurement Data (PMD)",
+}
+
 TAMANHO_MAXIMO_DE_LEITURAS_BUFFER = 10
 
 TratadorLeitura = Callable[[LeituraRSSI], None]
@@ -107,7 +112,10 @@ class ConexaoPulseira:
 
     @property
     def servicos(self) -> list[Servico]:
-        """Serviços GATT da pulseira conectada.
+        """Serviços GATT da pulseira conectada com UUID e descrição (RF07).
+
+        Returns:
+            list[Servico]: Um item por serviço, na ordem informada pela pulseira.
 
         Raises:
             FalhaConexao: Se a pulseira não estiver conectada.

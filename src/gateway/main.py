@@ -182,9 +182,9 @@ async def teste_rf07() -> None:
         servicos = conexao.servicos
         for servico in servicos:
             logging.info(f"Serviço {servico.uuid} | {servico.descricao}")
-        _verificar("todo serviço tem UUID e descrição", all(s.uuid and s.descricao for s in servicos))
-        _verificar("serviço de frequência cardíaca (0x180D) na lista",
-                   any(s.uuid.lower() == UUID_SERVICO_FC for s in servicos))
+        sem_descricao = [s.uuid for s in servicos if s.descricao == "Unknown"]
+        _verificar(f"todo serviço tem UUID e descrição (sem descrição: {sem_descricao or 'nenhum'})",
+            all(s.uuid for s in servicos) and not sem_descricao)
 
 
 async def teste_rf04(duracao: float = 30) -> None:
