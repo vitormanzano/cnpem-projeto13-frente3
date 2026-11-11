@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitor da pulseira</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f9f9f7; --surface: #fcfcfb;
+    --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,.10);
+    --series: #2a78d6;
+    --good: #0ca30c; --warn: #fab219; --serious: #ec835a; --crit: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0d0d0d; --surface: #1a1a19;
+      --ink: #f0efec; --ink2: #c3c2b7;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10);
+      --series: #3987e5;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 980px; margin: 0 auto; padding: 20px 16px 32px; }
+
+  header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0; }
+  .meta { display: flex; align-items: center; gap: 10px; color: var(--ink2); font-size: 13px; }
+  .badge { font-size: 11px; font-weight: 600; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--axis); color: var(--ink2); }
+  .pill { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; padding: 4px 12px 4px 10px; border-radius: 999px; background: var(--surface); border: 1px solid var(--border); }
+  .pill i { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  #notice { margin: 10px 0 0; min-height: 20px; font-size: 13px; color: var(--ink2); }
+
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 12px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+  .label { font-size: 13px; color: var(--ink2); margin: 0 0 4px; display: flex; align-items: center; gap: 8px; }
+  .hero { font-size: 72px; line-height: 1.05; font-weight: 600; letter-spacing: -.02em; display: flex; align-items: baseline; gap: 8px; }
+  .hero .empty { color: var(--muted); font-weight: 300; }
+  .hero small { font-size: 18px; font-weight: 500; color: var(--ink2); letter-spacing: 0; }
+  .sub { margin: 6px 0 0; font-size: 13px; color: var(--ink2); min-height: 20px; }
+  .stats { display: flex; gap: 20px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--grid); font-size: 13px; color: var(--ink2); }
+  .stats b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .heart { width: 16px; height: 16px; color: var(--muted); }
+  .heart.on { color: var(--ink2); animation: beat var(--beat, 1s) ease-in-out infinite; }
+  @keyframes beat { 0%, 100% { transform: scale(1); } 15% { transform: scale(1.25); } 30% { transform: scale(1); } }
+  @media (prefers-reduced-motion: reduce) { .heart.on { animation: none; } }
+
+  .sig { display: flex; align-items: flex-end; gap: 3px; height: 28px; margin-left: auto; }
+  .sig span { width: 7px; border-radius: 2px; background: var(--grid); }
+  .sig span:nth-child(1) { height: 25%; } .sig span:nth-child(2) { height: 50%; }
+  .sig span:nth-child(3) { height: 75%; } .sig span:nth-child(4) { height: 100%; }
+  .qual { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; font-size: 14px; }
+  .qual i { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-style: normal; font-size: 11px; font-weight: 700; }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 18px 0 8px; font-size: 13px; color: var(--ink2); }
+  .seg { display: inline-flex; border: 1px solid var(--axis); border-radius: 8px; overflow: hidden; }
+  .seg button { font: inherit; font-size: 13px; padding: 4px 12px; border: 0; background: transparent; color: var(--ink2); cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--axis); }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); font-weight: 600; }
+  .seg button:focus-visible { outline: 2px solid var(--series); outline-offset: -2px; }
+
+  .chart { margin-bottom: 14px; }
+  .chart h2 { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
+  .plot { position: relative; }
+  canvas { display: block; width: 100%; height: 200px; touch-action: pan-y; }
+  .tip { position: absolute; top: 0; pointer-events: none; transform: translate(-50%, -100%); margin-top: -4px; background: var(--ink); color: var(--surface); font-size: 12px; padding: 4px 8px; border-radius: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; display: none; }
+
+  details { margin-top: 4px; font-size: 13px; color: var(--ink2); }
+  summary { cursor: pointer; padding: 4px 0; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--grid); }
+  th:first-child, td:first-child, th:last-child, td:last-child { text-align: left; }
+  th { color: var(--ink2); font-weight: 600; }
+  td { color: var(--ink); }
+  .svc { margin-top: 8px; display: grid; gap: 8px; }
+  .svc article { border: 1px solid var(--grid); border-radius: 8px; padding: 8px 12px; }
+  .svc h3 { font-size: 13px; font-weight: 600; color: var(--ink); margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .svc code { font-size: 12px; color: var(--muted); font-weight: 400; word-break: break-all; }
+  .svc ul { margin: 6px 0 0; padding-left: 18px; }
+  .svc li { margin: 2px 0; }
+  .svc .props { color: var(--muted); }
+  footer { margin-top: 18px; font-size: 12px; color: var(--muted); }
+
+  @media (max-width: 700px) { .tiles { grid-template-columns: 1fr; } .hero { font-size: 60px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Monitor da pulseira</h1>
+    <div class="meta">
+      <span id="device">—</span>
+      <span class="badge" id="sim" hidden>SIMULADO</span>
+      <span class="pill" id="pill"><i></i><span>Iniciando</span></span>
+    </div>
+  </header>
+  <p id="notice" role="status"></p>
+
+  <section class="tiles" aria-label="Valores atuais">
+    <article class="card">
+      <p class="label">
+        <svg class="heart" id="heart" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+        Frequência cardíaca
+      </p>
+      <div class="hero"><span id="hr">—</span><small>bpm</small></div>
+      <p class="sub" id="hr-sub"></p>
+      <div class="stats">
+        <span>Mín <b id="s-min">—</b></span>
+        <span>Média <b id="s-avg">—</b></span>
+        <span>Máx <b id="s-max">—</b></span>
+      </div>
+    </article>
+
+    <article class="card">
+      <p class="label">
+        Força do sinal (RSSI)
+        <span class="sig" id="sig" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+      </p>
+      <div class="hero"><span id="rssi">—</span><small>dBm</small></div>
+      <p class="sub"><span class="qual" id="qual"></span></p>
+      <div class="stats"><span id="rssi-sub">Valor suavizado; o bruto aparece aqui.</span></div>
+    </article>
+  </section>
+
+  <div class="controls">
+    Janela dos gráficos
+    <div class="seg" role="group" aria-label="Janela de tempo">
+      <button data-w="60" aria-pressed="false">1 min</button>
+      <button data-w="300" aria-pressed="true">5 min</button>
+      <button data-w="900" aria-pressed="false">15 min</button>
+    </div>
+  </div>
+
+  <section class="card chart">
+    <h2>Frequência cardíaca (bpm)</h2>
+    <div class="plot"><canvas id="c-hr" role="img" aria-label="Gráfico da frequência cardíaca"></canvas><div class="tip" id="t-hr"></div></div>
+  </section>
+
+  <section class="card chart">
+    <h2>Força do sinal — RSSI suavizado (dBm)</h2>
+    <div class="plot"><canvas id="c-rssi" role="img" aria-label="Gráfico da força do sinal"></canvas><div class="tip" id="t-rssi"></div></div>
+  </section>
+
+  <details id="tbl">
+    <summary>Ver tabela das últimas leituras</summary>
+    <table>
+      <thead><tr><th>Hora</th><th>FC (bpm)</th><th>RSSI (dBm)</th><th>RSSI suavizado</th><th>Estado</th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </details>
+
+  <details id="svc-box">
+    <summary>Ver serviços disponíveis na pulseira</summary>
+    <p class="sub" id="svc-sub"></p>
+    <div class="svc" id="svc"></div>
+  </details>
+
+  <footer>Protótipo de pesquisa: não é dispositivo médico e não substitui procedimentos de segurança.</footer>
+</main>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const MAX_POINTS = 900;
+const STATE_LABEL = { iniciando: "Iniciando", procurando: "Procurando pulseira", conectando: "Conectando",
+                      conectado: "Conectado", reconectando: "Reconectando", erro: "Erro" };
+const STATE_COLOR = { conectado: "var(--good)", procurando: "var(--warn)", conectando: "var(--warn)",
+                      reconectando: "var(--warn)", erro: "var(--crit)" };
+
+let data = [];
+let windowSec = 300;
+let online = true;
+
+// ---- qualidade do sinal (zonas em dBm; ajuste aqui se necessário) ----------
+function quality(v) {
+  if (v == null) return { label: "Sem sinal", bars: 0, color: "var(--muted)", glyph: "–", fg: "#fff", hint: "Sem leitura de RSSI" };
+  if (v >= -60) return { label: "Ótimo",  bars: 4, color: "var(--good)", glyph: "✓", fg: "#fff",    hint: "Pulseira bem posicionada" };
+  if (v >= -70) return { label: "Bom",    bars: 3, color: "var(--good)", glyph: "✓", fg: "#fff",    hint: "Sinal estável" };
+  if (v >= -80) return { label: "Fraco",  bars: 2, color: "var(--warn)", glyph: "!", fg: "#0b0b0b", hint: "Perto do limite — aproxime-se do coletor" };
+  return            { label: "Crítico", bars: 1, color: "var(--crit)", glyph: "✕", fg: "#fff",    hint: "Risco de queda de conexão" };
+}
+
+const clock = (t) => new Date(t * 1000).toLocaleTimeString("pt-BR");
+const cssv = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+// ---- gráficos ---------------------------------------------------------------
+const CHARTS = {
+  hr: {
+    canvas: $("#c-hr"), tip: $("#t-hr"), rightPad: 10,
+    pick: (s) => s.hr, fmt: (v) => `${Math.round(v)} bpm`,
+    range(pts) {
+      const vals = pts.map((p) => p.v).filter((v) => v != null);
+      if (!vals.length) return { min: 50, max: 100, step: 10 };
+      let lo = Math.min(...vals) - 5, hi = Math.max(...vals) + 5;
+      if (hi - lo < 20) { const mid = (hi + lo) / 2; lo = mid - 10; hi = mid + 10; }
+      lo = Math.max(0, lo);   // FC nunca é negativa: o eixo não desce abaixo de 0
+      const min = Math.floor(lo / 5) * 5;
+      const step = Math.max(5, Math.ceil((hi - min) / 4 / 5) * 5);
+      return { min, max: min + step * 4, step };
+    },
+  },
+  rssi: {
+    canvas: $("#c-rssi"), tip: $("#t-rssi"), rightPad: 58,
+    pick: (s) => s.rssi_avg, fmt: (v) => `${Math.round(v)} dBm`,
+    range: () => ({ min: -100, max: -40, step: 10 }),
+    zones: [["Ótimo", -50], ["Bom", -65], ["Fraco", -75], ["Crítico", -90]],
+    dashed: -80,
+  },
+};
+
+function prepare(c) {
+  const r = c.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(10, Math.round(r.width)), h = Math.round(r.height);
+  if (c.width !== w * dpr || c.height !== h * dpr) { c.width = w * dpr; c.height = h * dpr; }
+  const ctx = c.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w, h };
+}
+
+function drawChart(cfg) {
+  const c = cfg.canvas;
+  const { ctx, w, h } = prepare(c);
+  ctx.clearRect(0, 0, w, h);
+  const last = data[data.length - 1];
+  if (!last) return;
+
+  const m = { l: 44, r: cfg.rightPad, t: 10, b: 24 };
+  const x0 = m.l, x1 = w - m.r, y0 = m.t, y1 = h - m.b;
+  const tEnd = last.t, tStart = tEnd - windowSec;
+  const pts = data.filter((s) => s.t >= tStart - 2).map((s) => ({ t: s.t, v: cfg.pick(s) }));
+  const { min, max, step } = cfg.range(pts);
+  const X = (t) => x0 + ((t - tStart) / windowSec) * (x1 - x0);
+  const Y = (v) => y1 - ((Math.min(max, Math.max(min, v)) - min) / (max - min)) * (y1 - y0);
+
+  const muted = cssv("--muted"), grid = cssv("--grid"), axis = cssv("--axis"),
+        series = cssv("--series"), surface = cssv("--surface");
+  ctx.font = "12px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  ctx.fillStyle = muted; ctx.textBaseline = "middle"; ctx.textAlign = "right";
+
+  // grade + rótulos do eixo y
+  for (let v = min; v <= max + 1e-6; v += step) {
+    const y = Y(v);
+    ctx.strokeStyle = v === min ? axis : grid; ctx.lineWidth = 1;
+    ctx.setLineDash(v === cfg.dashed ? [4, 4] : []);
+    if (v === cfg.dashed) ctx.strokeStyle = axis;
+    ctx.beginPath(); ctx.moveTo(x0, y + .5); ctx.lineTo(x1, y + .5); ctx.stroke();
+    ctx.fillText(String(v), x0 - 8, y);
+  }
+  ctx.setLineDash([]);
+
+  // nomes das zonas (só no RSSI)
+  if (cfg.zones) {
+    ctx.textAlign = "left";
+    for (const [nome, v] of cfg.zones) ctx.fillText(nome, x1 + 8, Y(v));
+  }
+
+  // eixo x
+  ctx.textBaseline = "alphabetic"; ctx.textAlign = "left";
+  ctx.fillText(windowSec >= 60 ? `há ${windowSec / 60} min` : `há ${windowSec} s`, x0, h - 6);
+  ctx.textAlign = "right"; ctx.fillText("agora", x1, h - 6);
+
+  // linha (quebra onde há lacuna de dados)
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x0, y0 - 4, x1 - x0, y1 - y0 + 8); ctx.clip();
+  ctx.beginPath();
+  let pen = false, prev = null;
+  for (const p of pts) {
+    if (p.v == null) { pen = false; prev = null; continue; }
+    if (prev && p.t - prev.t > 3) pen = false;
+    const x = X(p.t), y = Y(p.v);
+    if (!pen) { ctx.moveTo(x, y); pen = true; } else ctx.lineTo(x, y);
+    prev = p;
+  }
+  ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.lineCap = "round"; ctx.strokeStyle = series; ctx.stroke();
+  ctx.restore();
+
+  // marcador do valor mais recente + ponto sob o cursor
+  const dot = (p) => {
+    ctx.beginPath(); ctx.arc(X(p.t), Y(p.v), 6, 0, Math.PI * 2); ctx.fillStyle = surface; ctx.fill();
+    ctx.beginPath(); ctx.arc(X(p.t), Y(p.v), 4, 0, Math.PI * 2); ctx.fillStyle = series; ctx.fill();
+  };
+  const lastPt = pts[pts.length - 1];
+  if (lastPt && lastPt.v != null) dot(lastPt);
+
+  if (cfg.hover) {
+    const p = cfg.hover;
+    ctx.strokeStyle = axis; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(X(p.t) + .5, y0); ctx.lineTo(X(p.t) + .5, y1); ctx.stroke();
+    dot(p);
+  }
+  cfg.geo = { X, x0, x1, y0, tStart, pts };
+}
+
+function attachHover(cfg) {
+  const c = cfg.canvas;
+  c.addEventListener("pointermove", (e) => {
+    if (!cfg.geo) return;
+    const rect = c.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const { x0, x1, tStart, pts, X } = cfg.geo;
+    if (px < x0 || px > x1) return leave();
+    const t = tStart + ((px - x0) / (x1 - x0)) * windowSec;
+    let best = null;
+    for (const p of pts) if (p.v != null && (!best || Math.abs(p.t - t) < Math.abs(best.t - t))) best = p;
+    if (!best || Math.abs(best.t - t) > 5) return leave();
+    cfg.hover = best;
+    drawChart(cfg);
+    cfg.tip.textContent = `${clock(best.t)} · ${cfg.fmt(best.v)}`;
+    cfg.tip.style.display = "block";
+    const half = cfg.tip.offsetWidth / 2;
+    cfg.tip.style.left = Math.min(rect.width - half, Math.max(half, X(best.t))) + "px";
+  });
+  const leave = () => { cfg.hover = null; cfg.tip.style.display = "none"; drawChart(cfg); };
+  c.addEventListener("pointerleave", leave);
+}
+
+// ---- painel -----------------------------------------------------------------
+function render() {
+  const s = data[data.length - 1];
+  const pill = $("#pill");
+  if (!online) {
+    pill.lastElementChild.textContent = "Servidor offline"; pill.firstElementChild.style.background = "var(--muted)";
+    $("#notice").textContent = "Sem conexão com o servidor do dashboard. Tentando reconectar…";
+  }
+  if (!s) return;
+
+  if (online) {
+    pill.lastElementChild.textContent = STATE_LABEL[s.state] || s.state;
+    pill.firstElementChild.style.background = STATE_COLOR[s.state] || "var(--muted)";
+    $("#notice").textContent = s.detail || "";
+  }
+  $("#device").textContent = s.device || "—";
+  $("#sim").hidden = s.source !== "simulado";
+
+  // frequência cardíaca
+  const live = s.hr != null;
+  $("#hr").textContent = live ? s.hr : "–";
+  $("#hr").classList.toggle("empty", !live);
+  $("#hr-sub").textContent = live
+    ? (s.hr_age < 2.5 ? "ao vivo" : `última leitura há ${Math.round(s.hr_age)} s`)
+    : (s.state === "conectado" ? "Conectado, aguardando leitura de FC…" : "Sem leitura de FC");
+  const heart = $("#heart");
+  heart.classList.toggle("on", live);
+  if (live) document.documentElement.style.setProperty("--beat", (60 / Math.max(s.hr, 1)).toFixed(2) + "s");
+  $("#s-min").textContent = s.stats.min ?? "—";
+  $("#s-avg").textContent = s.stats.avg ?? "—";
+  $("#s-max").textContent = s.stats.max ?? "—";
+
+  // força do sinal
+  const q = quality(s.rssi_avg);
+  $("#rssi").textContent = s.rssi_avg != null ? Math.round(s.rssi_avg) : "–";
+  $("#rssi").classList.toggle("empty", s.rssi_avg == null);
+  const qual = $("#qual");
+  qual.innerHTML = "";
+  const icon = document.createElement("i");
+  icon.textContent = q.glyph; icon.style.background = q.color; icon.style.color = q.fg;
+  qual.append(icon, `${q.label} · ${q.hint}`);
+  [...$("#sig").children].forEach((bar, i) => { bar.style.background = i < q.bars ? q.color : ""; });
+  $("#rssi-sub").textContent = s.rssi != null ? `Bruto: ${s.rssi} dBm · limite de handoff: -80 dBm` : "Sem leitura de RSSI";
+
+  drawChart(CHARTS.hr);
+  drawChart(CHARTS.rssi);
+  CHARTS.hr.canvas.setAttribute("aria-label", `Frequência cardíaca: ${live ? s.hr + " bpm" : "sem leitura"}`);
+  CHARTS.rssi.canvas.setAttribute("aria-label", `Força do sinal: ${q.label}${s.rssi_avg != null ? ", " + Math.round(s.rssi_avg) + " dBm" : ""}`);
+  if ($("#tbl").open) renderTable();
+}
+
+function renderTable() {
+  const rows = data.slice(-30).reverse().map((s) =>
+    `<tr><td>${clock(s.t)}</td><td>${s.hr ?? "—"}</td><td>${s.rssi ?? "—"}</td><td>${s.rssi_avg != null ? Math.round(s.rssi_avg) : "—"}</td><td>${STATE_LABEL[s.state] || s.state}</td></tr>`);
+  $("#tbody").innerHTML = rows.join("");
+}
+
+// ---- serviços GATT (só informativo) ------------------------------------------
+const esc = (t) => String(t).replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]);
+const shortUuid = (u) => { const m = /^0000([0-9a-f]{4})-0000-1000-8000-00805f9b34fb$/.exec(u); return m ? "0x" + m[1].toUpperCase() : u; };
+
+async function renderServices() {
+  let info;
+  try { info = await (await fetch("/api/services")).json(); } catch (_) { $("#svc-sub").textContent = "Não foi possível consultar o servidor."; return; }
+  if (!info.services.length) {
+    $("#svc-sub").textContent = "Conecte a pulseira para listar os serviços.";
+    $("#svc").innerHTML = "";
+    return;
+  }
+  $("#svc-sub").textContent = `${info.services.length} serviço(s) anunciado(s) por ${info.device || "pulseira"}. O dashboard usa apenas o de frequência cardíaca.`;
+  $("#svc").innerHTML = info.services.map((s) => `
+    <article>
+      <h3>${esc(s.name)} <code>${esc(shortUuid(s.uuid))}</code>${s.in_use ? ' <span class="badge">EM USO</span>' : ""}</h3>
+      <ul>${s.chars.map((c) => `<li>${esc(c.name)} <code>${esc(shortUuid(c.uuid))}</code> <span class="props">· ${esc(c.props.join(", "))}</span></li>`).join("")}</ul>
+    </article>`).join("");
+}
+
+// ---- eventos ----------------------------------------------------------------
+document.querySelectorAll(".seg button").forEach((b) => b.addEventListener("click", () => {
+  windowSec = Number(b.dataset.w);
+  document.querySelectorAll(".seg button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+  render();
+}));
+$("#tbl").addEventListener("toggle", () => { if ($("#tbl").open) renderTable(); });
+$("#svc-box").addEventListener("toggle", () => { if ($("#svc-box").open) renderServices(); });
+attachHover(CHARTS.hr); attachHover(CHARTS.rssi);
+new ResizeObserver(() => { drawChart(CHARTS.hr); drawChart(CHARTS.rssi); }).observe(document.body);
+
+async function start() {
+  try { data = await (await fetch("/api/history")).json(); } catch (_) { data = []; }
+  render();
+  const es = new EventSource("/events");
+  es.onmessage = (e) => {
+    const s = JSON.parse(e.data);
+    if (!data.length || s.t > data[data.length - 1].t) {
+      data.push(s);
+      if (data.length > MAX_POINTS) data.shift();
+    }
+    online = true; render();
+  };
+  es.onerror = () => { online = false; render(); };   // o navegador reconecta sozinho
+}
+start();
+</script>
+</body>
+</html>
