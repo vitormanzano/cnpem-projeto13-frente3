@@ -12,6 +12,9 @@ from bluetooth.domain.erros import BrokerIndisponivel
 from bluetooth.domain.models import EstadoConexao
 from bluetooth.scanner import ler_endereco_pulseira
 from coletor.coletor import ler_prazo_conexao
+from coordenador.conexao_fraca import (
+    LEITURAS_FRACAS_PADRAO, LEITURAS_NORMAIS_PADRAO, LIMIAR_CONEXAO_FRACA_PADRAO, ClassificacaoConexaoFraca,
+)
 from coordenador.decisao import MARGEM_HISTERESE_PADRAO, escolher_coletor
 from coordenador.visao import MINIMO_AMOSTRAS_PADRAO, SinalColetor, VisaoColetores
 from mqtt.conexao import ConexaoBroker
@@ -23,11 +26,12 @@ INTERVALO_SINAL_DE_VIDA_PADRAO = 5.0
 JANELA_DISPUTA_PADRAO          = 3.0 # A mesma na disputa e no handoff (RF14)
 FATOR_EXTENSAO_JANELA_PADRAO   = 3.0 # Sem sinal válido, a janela vai até janela * fator
 INTERVALO_VERFICACAO           = 0.5 # s entre verificações durante a extensão
-LIMIAR_CONEXAO_FRACA_PADRAO    = -78
-LEITURAS_FRACAS_PADRAO         = 3
 PRAZO_LIBERACAO_PADRAO         = 3.0 # s para a origem confirmar que soltou
 PRAZO_SINAL_DE_VIDA_PADRAO     = 15.0 # s sem mensagem até o coletor ficar indisponível (RF13)
 INTERVALO_VERIFICACAO_COLETORES = 1.0 # s entre as verificações de sinal de vida e posse órfã
+# s depois de cada conexão ao broker para receber as retidas e a fila da sessão persistente antes
+# de decidir qualquer coisa (RF19). O MQTT não avisa quando as retidas acabaram de chegar.
+ESPERA_MENSAGENS_RETIDAS       = 2.0
 
 
 def ler_pulseiras_acompanhadas(pulseiras: list[str] | None = None) -> frozenset[str]:
@@ -172,11 +176,60 @@ def ler_intervalo_sinal_de_vida(intervalo: float | None = None) -> float:
         ValueError: Se o intervalo não for positivo ou a variável de ambiente não for um número.
     """
     if intervalo is None:
-        intervalo = float(os.getenv("PRESENCA_INTERVALO_COORDENADOR", INTERVALO_SINAL_DE_VIDA_PADRAO))
+        intervalo = _numero_do_ambiente("PRESENCA_INTERVALO_COORDENADOR", INTERVALO_SINAL_DE_VIDA_PADRAO)
 
     if intervalo <= 0:
         raise ValueError("PRESENCA_INTERVALO_COORDENADOR deve ser maior que zero.")
     return intervalo
+
+
+def ler_leituras_fracas(leituras: int | None = None) -> int:
+    """Resolve quantas leituras seguidas abaixo do limiar põem o coletor ativo em conexao-fraca (RF19).
+
+    Args:
+        leituras (int | None): Se omitido, é lido de LEITURAS_FRACAS (padrão de 3).
+
+    Raises:
+        ValueError: Se não for um inteiro maior ou igual a 1.
+    """
+    if leituras is None:
+        leituras = _numero_do_ambiente("LEITURAS_FRACAS", LEITURAS_FRACAS_PADRAO, int)
+    # Com zero, toda leitura do dono seria conexao-fraca e dispararia o handoff
+    if leituras < 1:
+        raise ValueError("LEITURAS_FRACAS deve ser pelo menos 1.")
+    return leituras
+
+
+def ler_leituras_normais(leituras: int | None = None) -> int:
+    """Resolve quantas leituras seguidas entram na mediana que tira o coletor de conexao-fraca (RF19).
+
+    Args:
+        leituras (int | None): Se omitido, é lido de LEITURAS_NORMAIS (padrão de 3).
+
+    Raises:
+        ValueError: Se não for um inteiro maior ou igual a 1.
+    """
+    if leituras is None:
+        leituras = _numero_do_ambiente("LEITURAS_NORMAIS", LEITURAS_NORMAIS_PADRAO, int)
+    if leituras < 1:
+        raise ValueError("LEITURAS_NORMAIS deve ser pelo menos 1.")
+    return leituras
+
+
+def ler_prazo_liberacao(prazo: float | None = None) -> float:
+    """Resolve o prazo para a origem do handoff publicar a liberação (RF06).
+
+    Args:
+        prazo (float | None): Segundos. Se omitido, é lido de PRAZO_LIBERACAO (padrão de 3 s).
+
+    Raises:
+        ValueError: Se não for um número maior que zero.
+    """
+    if prazo is None:
+        prazo = _numero_do_ambiente("PRAZO_LIBERACAO", PRAZO_LIBERACAO_PADRAO)
+    if prazo <= 0:
+        raise ValueError("PRAZO_LIBERACAO deve ser maior que zero.")
+    return prazo
 
 
 def ler_limiar_conexao_fraca(limiar: int | None = None) -> int:
@@ -247,9 +300,10 @@ class Coordenador:
     ) -> None:
         """Registra sua presença e coordena os coletores.
             Args:
-                broker (ConexaoBroker): Sessão MQTT do coletor.
+                broker (ConexaoBroker): Sessão MQTT do coordenador; o client id (COORDENADOR_ID) é a
+                    origem das suas mensagens, a única que os coletores aceitam para posse e handoff (RF19).
                 intervalo (float | None): Segundos entre os sinais de vida. Se omitido, é lido
-                    de PRESENCA_INTERVALO (padrão de 5 s).
+                    de PRESENCA_INTERVALO_COORDENADOR (padrão de 5 s).
                 pulseiras (list[str] | None): Pulseiras acompanhadas; mensagens de outras são ignoradas
                     (RF13). Se omitido, são lidas de PULSEIRAS ou TARGET_ADDRESS.
                 prazo_sinal_de_vida (float | None): Segundos sem mensagem de um coletor até considerá-lo
@@ -257,10 +311,12 @@ class Coordenador:
 
             A disputa pela posse (RF14) é configurada pelo ambiente: JANELA_DISPUTA (padrão de 3 s),
             FATOR_EXTENSAO_JANELA (3), MARGEM_HISTERESE (5 dB), MINIMO_AMOSTRAS (5) e PRAZO_CONEXAO (5 s).
+            A conexao-fraca (RF19), por LIMIAR_CONEXAO_FRACA (-78 dBm), LEITURAS_FRACAS (3) e
+            LEITURAS_NORMAIS (3); o handoff (RF06), por PRAZO_LIBERACAO (3 s).
 
             Raises:
                 ValueError: Se o intervalo, as pulseiras, o prazo de sinal de vida ou a configuração
-                    da disputa forem inválidos.
+                    da disputa, da conexao-fraca ou do handoff forem inválidos.
         """
         self.broker:           ConexaoBroker            = broker
         self.intervalo:        float                    = ler_intervalo_sinal_de_vida(intervalo)
@@ -271,26 +327,36 @@ class Coordenador:
         self._ouvindo                                   = False # Conectado, com a contagem de sinal de vida reiniciada
         self._pulseiras_ignoradas: set[str]             = set() # Não configuradas, já avisadas no log
 
-        self.broker.ultima_vontade                      = self._ultima_vontade()
-        self.broker.keepalive                           = self.intervalo # Igual ao sinal de vida, como no coletor (RF11)
-        self.broker.adicionar_ao_conectar(self.anunciar_online)
-        self.broker.adicionar_ao_conectar(self._reiniciar_contagem)
-        self.broker.adicionar_ao_desconectar(self._parar_contagem)
-        self.broker.ao_receber                          = self.ao_receber
-
         self.janela_disputa                             = ler_janela_disputa()
         self.fator_extensao                             = ler_fator_extensao()
         self.margem                                     = ler_margem_histerese()
         self.prazo_conexao                              = ler_prazo_conexao()
         self.limiar                                     = ler_limiar_conexao_fraca()
-        self.minimo_fracas                              = int(os.getenv("LEITURAS_FRACAS", LEITURAS_FRACAS_PADRAO))
-        self.prazo_liberacao                            = float(os.getenv("PRAZO_LIBERACAO", PRAZO_LIBERACAO_PADRAO))
+        self.leituras_fracas                            = ler_leituras_fracas()
+        self.leituras_normais                           = ler_leituras_normais()
+        self.prazo_liberacao                            = ler_prazo_liberacao()
 
         self._liberacoes:      dict[str, _Espera]       = {} # Pulseira -> handoff aguardando a origem soltar (RF06)
         self._esperas_conexao: dict[str, _Espera]       = {} # Pulseira -> coletor com a posse aguardando conectar (RF14)
-        self._disputas:        dict[str, asyncio.Task]  = {} # Pulseira -> disputa ou handoff em andamento
-        self._leituras_fracas: dict[str, int]           = {} # Pulseira -> leituras fracas seguidas do dono
+        self._disputas:        dict[str, asyncio.Task]  = {} # Pulseira -> disputa, handoff ou republicação em andamento
+        # Pulseira -> conexao-fraca da conexão do dono atual (RF19); recomeça a cada posse publicada
+        self._classificacoes:  dict[str, ClassificacaoConexaoFraca] = {}
         self._ultimo_ativo:    dict[str, str]           = {} # Pulseira -> último coletor conectado (favorito)
+        # Reconstrução da visão (RF19): verdadeiro até as retidas chegarem depois de cada conexão
+        self._reconstruindo                             = True
+        self._a_republicar: set[str]                    = set(self.pulseiras) # Posse ainda não republicada neste processo
+        self._reconstrucao: asyncio.Task | None         = None
+        self._liberacoes_pendentes: dict[str, str]      = {} # Pulseira -> coletor que liberou antes de a posse retida chegar
+
+        self.broker.ultima_vontade                      = self._ultima_vontade()
+        self.broker.keepalive                           = self.intervalo # Igual ao sinal de vida, como no coletor (RF11)
+        # As liberações publicadas enquanto o coordenador reinicia ficam guardadas no broker (RF19)
+        self.broker.sessao_persistente                  = True
+        self.broker.adicionar_ao_conectar(self.anunciar_online)
+        self.broker.adicionar_ao_conectar(self._reiniciar_contagem)
+        self.broker.adicionar_ao_conectar(self._iniciar_reconstrucao)
+        self.broker.adicionar_ao_desconectar(self._parar_contagem)
+        self.broker.ao_receber                          = self.ao_receber
 
 
     async def assinar_topicos(self) -> None:
@@ -381,7 +447,10 @@ class Coordenador:
 
         # Só registra mudança: a presença também é republicada a cada reconexão e troca de pulseira
         if self.visao.atualizar_presenca(coletor, online, pulseira if online else None):
-            logging.info(f"Presença | Coletor: {coletor} | {estado.value}")
+            if online:
+                logging.info(f"Presença | Coletor: {coletor} | {estado.value}")
+            else:
+                logging.warning(f"Coletor indisponível | Coletor: {coletor} | Motivo: presença offline")
 
         if not online:
             for pulseira_orfa in self.visao.pulseiras_de(coletor):
@@ -417,11 +486,23 @@ class Coordenador:
         pulseira = Topicos.extrair_estado_posse(topico)
         if pulseira is None or not self._acompanha(pulseira, topico):
             return
+        if mensagem.origem != self.broker.cliente_id:
+            # Só o coordenador decide a posse (RF19); uma posse retida de outro id também não vale
+            logging.warning(
+                f"Posse descartada | Tópico: {topico} | Origem {mensagem.origem} não é este coordenador "
+                f"({self.broker.cliente_id}, COORDENADOR_ID)"
+            )
+            return
         dono = mensagem.conteudo["coletor"]
         if mensagem.conteudo["pulseira"] != pulseira or (dono is not None and (not isinstance(dono, str) or not dono)):
             logging.warning(f"Posse descartada | Tópico: {topico} | Conteúdo inválido: {mensagem.conteudo}")
             return
         self.visao.atualizar_posse(pulseira, dono)
+
+        # Liberação que chegou da sessão persistente antes da posse retida (coordenador reiniciou)
+        if (liberou := self._liberacoes_pendentes.pop(pulseira, None)) is not None and liberou == dono:
+            await self._liberar_posse(pulseira, f"liberação do coletor {dono} recebida durante o reinício")
+            return
 
         # Posse retida em um coletor que já caiu (ex: coordenador reiniciou)
         if dono is not None and dono in self.visao.coletores_offline:
@@ -437,10 +518,14 @@ class Coordenador:
             espera.responder(False) # Caiu antes de conectar: quem decide é a disputa (RF14, RF06)
             return
 
-        logging.info(f"Posse liberada | Pulseira: {pulseira} | Motivo: coletor {coletor} indisponível.")
-        self._leituras_fracas.pop(pulseira, None)
+        await self._liberar_posse(pulseira, f"coletor {coletor} indisponível")
+
+
+    async def _liberar_posse(self, pulseira: str, motivo: str) -> None:
+        """Publica a posse como liberada e registra o motivo; a falha no broker só vai para o log."""
         try:
             await self._publicar_posse(pulseira, None)
+            logging.info(f"Posse liberada | Pulseira: {pulseira} | Motivo: {motivo}")
         except BrokerIndisponivel as e:
             logging.warning(f"Erro: {BrokerIndisponivel.codigo} | Pulseira: {pulseira} | Posse não liberada: {e}")
 
@@ -497,6 +582,14 @@ class Coordenador:
             return
         if not self._registrar_mensagem(mensagem.origem, topico, mensagem):
             return
+        if self._reconstruindo and pulseira not in self.visao.posse:
+            # A sessão persistente entrega a fila antes das retidas: a posse decide quando chegar (RF19)
+            self._liberacoes_pendentes[pulseira] = mensagem.origem
+            logging.info(
+                f"Liberação guardada | Pulseira: {pulseira} | Coletor: {mensagem.origem} | "
+                "A posse retida ainda não chegou (reinício do coordenador)"
+            )
+            return
         if mensagem.origem != self.visao.posse.get(pulseira):
             logging.warning(f"Liberação descartada | Pulseira: {pulseira} | {mensagem.origem} não é o dono.")
             return
@@ -514,12 +607,8 @@ class Coordenador:
         if (espera := self._esperas_conexao.get(pulseira)) is not None and espera.coletor == mensagem.origem:
             espera.responder(False) # Desistiu antes de conectar: quem decide é a disputa (RF14, RF06)
             return
-        try:
-            # Coletor desconectado de forma controlada (RF14)
-            await self._publicar_posse(pulseira, None)
-            logging.info(f"Posse liberada | Pulseira: {pulseira} | Motivo: liberação do coletor {mensagem.origem}")
-        except BrokerIndisponivel as e:
-            logging.warning(f"Erro: {BrokerIndisponivel.codigo} | Pulseira: {pulseira} | Posse não liberada: {e}")
+        # Coletor desconectado de forma controlada (RF14)
+        await self._liberar_posse(pulseira, f"liberação do coletor {mensagem.origem}")
 
 
     async def _iniciar_handoff(self, pulseira: str, dono: str) -> None:
@@ -530,9 +619,8 @@ class Coordenador:
         id_handoff = uuid.uuid4().hex[:8] # Curto para o log; só precisa distinguir os handoffs entre si
         logging.info(
             f"Handoff iniciado | Id: {id_handoff} | Pulseira: {pulseira} | Origem: {dono} | Motivo: conexao-fraca "
-            f"({self._leituras_fracas[pulseira]} leituras < {self.limiar} dBm)"
+            f"({self.leituras_fracas} leituras < {self.limiar} dBm)"
         )
-        self._leituras_fracas[pulseira] = 0
         comando = Mensagem(
             tipo=TipoMensagem.HANDOFF,
             origem=self.broker.cliente_id,
@@ -548,6 +636,7 @@ class Coordenador:
             await self.broker.publicar(Topicos.handoff(pulseira), comando)
         except BrokerIndisponivel as e:
             self._liberacoes.pop(pulseira, None)
+            self._classificacoes.pop(pulseira, None) # Outra tentativa depois de novas leituras fracas
             logging.warning(
                 f"Erro: {BrokerIndisponivel.codigo} | Handoff: {id_handoff} | Pulseira: {pulseira} | "
                 f"Handoff não iniciado: {e}"
@@ -562,6 +651,8 @@ class Coordenador:
             try:
                 await asyncio.wait_for(liberada.fim.wait(), self.prazo_liberacao)
             except TimeoutError:
+                # A origem continua conectada: a classificação recomeça e outro handoff exige novas leituras fracas
+                self._classificacoes.pop(pulseira, None)
                 logging.warning(
                     f"Handoff cancelado | Id: {id_handoff} | Pulseira: {pulseira} | "
                     f"Origem {dono} não liberou em {self.prazo_liberacao:g} s; continua sendo dono."
@@ -671,6 +762,65 @@ class Coordenador:
         self._ouvindo = False
 
 
+    async def _iniciar_reconstrucao(self) -> None:
+        """A cada (re)conexão ao broker, suspende as decisões enquanto chegam as retidas e a fila da
+        sessão persistente (RF19).
+
+        A espera roda em tarefa própria: este gancho roda antes do laço de mensagens da ConexaoBroker,
+        então esperar aqui atrasaria as próprias mensagens que se quer receber.
+        """
+        self._reconstruindo = True
+        if self._reconstrucao is not None:
+            # Reconexão antes do fim da espera anterior: ela recomeça
+            self._reconstrucao.cancel()
+            await asyncio.gather(self._reconstrucao, return_exceptions=True)
+        self._reconstrucao = asyncio.create_task(self._reconstruir())
+
+
+    async def _reconstruir(self, espera: float = ESPERA_MENSAGENS_RETIDAS) -> None:
+        """Libera as decisões e, na primeira conexão do processo, republica a posse de cada pulseira
+        configurada (RF19). Nas reconexões a visão em memória continua valendo.
+
+        Args:
+            espera (float): Segundos para as retidas e a fila da sessão chegarem.
+        """
+        await asyncio.sleep(espera)
+        self._reconstruindo = False
+        # Liberação sem posse retida: a pulseira não tinha dono conhecido e a republicação a deixa liberada
+        self._liberacoes_pendentes.clear()
+        for pulseira in sorted(self._a_republicar):
+            if pulseira not in self._disputas:
+                self._disputas[pulseira] = asyncio.create_task(self._republicar_posse(pulseira))
+
+
+    async def _republicar_posse(self, pulseira: str) -> None:
+        """Republica a posse vigente (RF19): disputas e handoffs interrompidos pelo reinício recomeçam do zero.
+
+        O dono recebe a posse de novo e tem o prazo de conexão (RF14) para publicar o estado conectado,
+        senão ela é liberada. Isso alcança o coletor que soltou a pulseira (handoff, reconexão esgotada)
+        ou desistiu de conectar enquanto o coordenador estava fora: sem a republicação a posse ficaria
+        presa em nome dele. Sem dono, a posse sai liberada e a disputa abre com o próximo sinal válido.
+        """
+        try:
+            dono = self.visao.posse.get(pulseira)
+            if dono is None:
+                await self._publicar_posse(pulseira, None)
+                self._a_republicar.discard(pulseira)
+                logging.info(f"Posse republicada | Pulseira: {pulseira} | Coletor: nenhum | Motivo: reinício do coordenador")
+                return
+
+            espera = await self._conceder(pulseira, dono)
+            self._a_republicar.discard(pulseira)
+            logging.info(f"Posse republicada | Pulseira: {pulseira} | Coletor: {dono} | Motivo: reinício do coordenador")
+            if not await self._aguardar_conexao(pulseira, espera):
+                await self._resolver_falha_conexao(pulseira, dono, None, "")
+        except BrokerIndisponivel as e:
+            # Fica em _a_republicar: a próxima conexão tenta de novo
+            logging.warning(f"Erro: {BrokerIndisponivel.codigo} | Pulseira: {pulseira} | Posse não republicada: {e}")
+        finally:
+            self._disputas.pop(pulseira, None)
+
+
     async def registrar_visao(self) -> None:
         """Loga em DEBUG, a cada 10 s, como o coordenador enxerga a rede."""
         while not self._encerrada:
@@ -719,8 +869,10 @@ class Coordenador:
         Args:
             valido (bool): Se a leitura é um sinal válido (RF14), que abre a disputa sem posse vigente.
         """
+        if self._reconstruindo:
+            return # Visão incompleta: as retidas e a fila da sessão ainda estão chegando (RF19)
         if pulseira in self._disputas:
-            return # Disputa, handoff ou espera da conexão do vencedor em andamento
+            return # Disputa, handoff, republicação ou espera da conexão do vencedor em andamento
 
         dono = self.visao.posse.get(pulseira)
         if dono is None:
@@ -736,16 +888,37 @@ class Coordenador:
         await self._iniciar_handoff(pulseira, dono)
 
 
-    def _conexao_fraca(self, pulseira: str, sinal: SinalColetor) -> bool: 
-        """Conexao-fraca após N leituras consecutivas do dono abaixo do limiar."""
-        if sinal.estado is EstadoConexao.CONECTADO and sinal.rssi is not None and sinal.rssi < self.limiar:
-            fracas = self._leituras_fracas.get(pulseira, 0) + 1
-        else:
-            fracas = 0
-        self._leituras_fracas[pulseira] = fracas
-        if fracas == self.minimo_fracas:
-            logging.info(f"Estado: conexao-fraca | Pulseira: {pulseira} | RSSI: {sinal.rssi} dBm.")
-        return fracas >= self.minimo_fracas
+    def _conexao_fraca(self, pulseira: str, sinal: SinalColetor) -> bool:
+        """Classifica a leitura do dono (RF19).
+
+        Returns:
+            bool: True só na leitura que põe a conexão em conexao-fraca, que inicia o handoff (RF06).
+        """
+        if sinal.estado is not EstadoConexao.CONECTADO:
+            self._classificacoes.pop(pulseira, None) # Sem conexão, não há o que classificar
+            return False
+        if sinal.rssi is None:
+            return False # RSSI ilegível não é leitura: não conta como fraca nem como normal
+
+        classificacao = self._classificacoes.get(pulseira)
+        if classificacao is None:
+            classificacao = ClassificacaoConexaoFraca(self.limiar, self.leituras_fracas, self.leituras_normais)
+            self._classificacoes[pulseira] = classificacao
+        if not classificacao.registrar(sinal.rssi):
+            return False
+
+        dono = self.visao.posse.get(pulseira)
+        if classificacao.fraca:
+            logging.info(
+                f"Estado: conexao-fraca | Pulseira: {pulseira} | Coletor: {dono} | RSSI: {sinal.rssi} dBm | "
+                f"{self.leituras_fracas} leituras seguidas < {self.limiar} dBm"
+            )
+            return True
+        logging.info(
+            f"Estado: {EstadoConexao.CONECTADO.value} | Pulseira: {pulseira} | Coletor: {dono} | Conexão normal | "
+            f"Mediana: {classificacao.mediana:g} dBm > {self.limiar} dBm"
+        )
+        return False
 
 
     def _abrir_disputa(self, pulseira: str, inicio: float) -> None:
@@ -774,7 +947,7 @@ class Coordenador:
 
             if not self.visao.candidatos(pulseira, inicio):
                 if not await self._estender_janela(pulseira, inicio):
-                    logging.info(
+                    logging.warning(
                         f"Disputa sem vencedor{ref} | Pulseira: {pulseira} | Nenhum sinal válido em "
                         f"{self.janela_disputa * self.fator_extensao:g} s; posse continua liberada."
                     )
@@ -787,7 +960,7 @@ class Coordenador:
             candidatos = self.visao.candidatos(pulseira, inicio)
             vencedor = escolher_coletor(candidatos, favorito=favorito, margem=self.margem)
             if vencedor is None:
-                logging.info(f"Disputa sem vencedor{ref} | Pulseira: {pulseira} | Os candidatos ficaram indisponíveis durante a janela.")
+                logging.warning(f"Disputa sem vencedor{ref} | Pulseira: {pulseira} | Os candidatos ficaram indisponíveis durante a janela.")
                 return
 
             espera = await self._conceder(pulseira, vencedor)
@@ -891,6 +1064,7 @@ class Coordenador:
         )
         await self.broker.publicar(Topicos.estado_posse(pulseira), mensagem)
         self.visao.atualizar_posse(pulseira, coletor)
+        self._classificacoes.pop(pulseira, None) # Nova posse, nova conexão a classificar (RF19)
 
 
     async def _estender_janela(self, pulseira: str, inicio: float) -> bool:
@@ -922,7 +1096,9 @@ class Coordenador:
                 tarefa.result()
         finally:
             await self.anunciar_offline()
-            tarefas |= set(self._disputas.values())  # Janelas de disputa/handoff em andamento
+            tarefas |= set(self._disputas.values())  # Janelas de disputa/handoff e republicações em andamento
+            if self._reconstrucao is not None:
+                tarefas.add(self._reconstrucao)
             for tarefa in tarefas:
                 tarefa.cancel()
             await asyncio.gather(*tarefas, return_exceptions=True)

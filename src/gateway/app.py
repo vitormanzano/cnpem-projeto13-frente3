@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 
 from dotenv import load_dotenv
 
-from coletor.coletor import Coletor, identificador_coletor
+from coletor.coletor import Coletor, identificador_coletor, identificador_coordenador
 from coordenador.coordenador import Coordenador
 from bluetooth.scanner import ler_endereco_pulseira
 from mqtt.conexao import ConexaoBroker
@@ -39,7 +39,7 @@ async def rodar_coletor() -> None:
 
 
 async def rodar_coordenador() -> None:
-    cliente_id = os.getenv("COORDENADOR_ID", "coordenador")
+    cliente_id = identificador_coordenador()
     logging.info(f"Iniciando como coordenador | id {cliente_id}")
     try:
         coordenador = Coordenador(ConexaoBroker(cliente_id=cliente_id))

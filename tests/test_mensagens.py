@@ -341,7 +341,6 @@ def test_handoff_do_coordenador_tem_id_que_aparece_no_log_ate_a_disputa():
         coordenador = Coordenador(broker, pulseiras=[PULSEIRA])
         coordenador.janela_disputa = 3600  # a disputa não termina durante o teste
         coordenador.visao.atualizar_posse(PULSEIRA, COLETOR)
-        coordenador._leituras_fracas[PULSEIRA] = coordenador.minimo_fracas
         try:
             with capturar_log() as log:
                 await coordenador._iniciar_handoff(PULSEIRA, COLETOR)

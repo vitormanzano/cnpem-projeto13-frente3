@@ -9,9 +9,10 @@ from bluetooth.domain.erros import BluetoothIndisponivel, BrokerIndisponivel, Fa
 from bluetooth.domain.models import EstadoConexao, LeituraRSSI
 from bluetooth.reconexao import ler_configuracao_reconexao, manter_conexao
 from bluetooth.scanner import VarreduraPulseira
+from coletor.vigia_coordenador import VigiaCoordenador
 from mqtt.estado_rssi import EstadoRssiColetor
 from mqtt.frequencia_cardiaca import FrequenciaCardiacaColetor
-from mqtt.domain.models import Mensagem, TipoMensagem
+from mqtt.domain.models import EstadoPresenca, Mensagem, TipoMensagem
 from mqtt.domain.topicos import Topicos
 from mqtt.presenca import PresencaColetor
 from mqtt.conexao import ConexaoBroker
@@ -19,6 +20,7 @@ from mqtt.conexao import ConexaoBroker
 
 PRAZO_SEM_BROKER_PADRAO = 15.0
 PRAZO_CONEXAO_PADRAO    = 5.0
+ID_COORDENADOR_PADRAO   = "coordenador"
 
 
 def ler_prazo_conexao(prazo: float | None = None) -> float:
@@ -76,6 +78,16 @@ def identificador_coletor() -> str:
     return os.getenv("COLETOR_ID") or socket.gethostname()
 
 
+def identificador_coordenador() -> str:
+    """Id do coordenador (client id MQTT e `origem` das suas mensagens), lido de COORDENADOR_ID
+    (padrão: coordenador).
+
+    O coordenador o usa como client id e os coletores só aceitam posse e handoff com essa origem
+    (RF19), então o valor deve ser o mesmo na central e em todos os coletores.
+    """
+    return os.getenv("COORDENADOR_ID") or ID_COORDENADOR_PADRAO
+
+
 class Coletor:
     """Coletor BLE: Realiza todas as ações que um coletor precisa."""
 
@@ -85,6 +97,7 @@ class Coletor:
         endereco_pulseira: str,
         prazo_sem_broker: float | None = None,
         prazo_conexao: float | None = None,
+        id_coordenador: str | None = None,
     ) -> None:
         """
         Args:
@@ -95,6 +108,10 @@ class Coletor:
                 PRAZO_SEM_BROKER (padrão de 15 s).
             prazo_conexao (float | None): Segundos, depois de receber a posse, para publicar o estado
                 conectado (RF14). Se omitido, é lido de PRAZO_CONEXAO (padrão de 5 s).
+            id_coordenador (str | None): Única origem aceita para posse e handoff (RF19). Se omitido,
+                é lido de COORDENADOR_ID (padrão: coordenador).
+
+        O prazo sem sinal de vida do coordenador vem de PRAZO_SINAL_DE_VIDA_COORDENADOR (padrão de 15 s).
 
         Raises:
             ValueError: Se a configuração da conexão, da reconexão, dos prazos ou do buffer
@@ -124,6 +141,10 @@ class Coletor:
         self._soltando_sem_broker                             = False
         self.broker.adicionar_ao_desconectar(self._iniciar_prazo_sem_broker)
         self.broker.adicionar_ao_conectar(self._cancelar_prazo_sem_broker)
+        self.id_coordenador                                   = id_coordenador or identificador_coordenador()
+        self.vigia_coordenador                                = VigiaCoordenador()         # Só registra a indisponibilidade (RF19)
+        self.broker.adicionar_ao_conectar(self.vigia_coordenador.reiniciar_contagem)
+        self.broker.adicionar_ao_desconectar(self.vigia_coordenador.pausar)
 
 
     @property
@@ -150,6 +171,20 @@ class Coletor:
 
     async def ao_receber(self, topico: str, mensagem: Mensagem) -> None:
         match mensagem.tipo:
+            case TipoMensagem.POSSE | TipoMensagem.HANDOFF if mensagem.origem != self.id_coordenador:
+                # Só o coordenador concede a posse e manda soltar (RF19)
+                logging.warning(
+                    f"Mensagem ignorada | Tópico: {topico} | Origem {mensagem.origem} não é o coordenador "
+                    f"{self.id_coordenador} (COORDENADOR_ID)"
+                )
+            case TipoMensagem.PRESENCA if topico == Topicos.presenca_coordenador():
+                self._tratar_presenca_coordenador(topico, mensagem)
+            case TipoMensagem.SINAL_DE_VIDA if topico == Topicos.sinal_de_vida_coordenador():
+                if mensagem.origem == self.id_coordenador:
+                    self.vigia_coordenador.registrar_sinal_de_vida()
+                else:
+                    # DEBUG: chega a cada poucos segundos e a presença já avisa da origem estranha
+                    logging.debug(f"Sinal de vida ignorado | Origem {mensagem.origem} não é o coordenador {self.id_coordenador}")
             case TipoMensagem.POSSE:
                 if Topicos.extrair_estado_posse(topico) == self.endereco:
                     await self._tratar_posse(mensagem.conteudo.get("coletor"))
@@ -158,6 +193,18 @@ class Coletor:
                         and mensagem.conteudo.get("origem") == self.broker.cliente_id):
                     await self._liberar("handoff", handoff=mensagem.conteudo.get("id"))
                     self._iniciar_varredura() # Volta a disputar como favorito
+
+
+    def _tratar_presenca_coordenador(self, topico: str, mensagem: Mensagem) -> None:
+        """Presença do coordenador (RF19): só alimenta o vigia, não muda a posse nem a conexão."""
+        try:
+            if mensagem.origem != self.id_coordenador:
+                raise ValueError(f"origem {mensagem.origem!r} não é o coordenador {self.id_coordenador!r} (COORDENADOR_ID)")
+            estado = EstadoPresenca(mensagem.conteudo["estado"])
+        except ValueError as e:
+            logging.warning(f"Presença do coordenador descartada | Tópico: {topico} | {e}")
+            return
+        self.vigia_coordenador.registrar_presenca(estado is EstadoPresenca.ONLINE)
 
 
     async def _tratar_posse(self, dono: str | None) -> None:
@@ -176,6 +223,10 @@ class Coletor:
                 espera = asyncio.create_task(self._vigiar_prazo_conexao(self._sessao))
                 self._esperas_conexao.add(espera)
                 espera.add_done_callback(self._esperas_conexao.discard)
+            elif self._conectou.is_set():
+                # Posse republicada (coordenador reiniciou, RF19): ele espera o estado conectado, que
+                # sem mudança de estado só sairia na próxima leitura de RSSI (ou nunca, sem RSSI)
+                await self.estado_rssi.republicar_ultima()
             await self.presenca.atualizar_pulseira(self.endereco)
             return
         # Antes de desconectar: leituras que ainda cheguem sairiam duplicadas com as do novo dono (RF17)
@@ -368,6 +419,7 @@ class Coletor:
             asyncio.create_task(self.presenca.manter_sinal_de_vida()),
             asyncio.create_task(self.estado_rssi.manter_publicacao()),
             asyncio.create_task(self.frequencia.manter_publicacao()),
+            asyncio.create_task(self.vigia_coordenador.manter_verificacao()),
         }
         try:
             await asyncio.wait(tarefas, return_when=asyncio.FIRST_EXCEPTION)

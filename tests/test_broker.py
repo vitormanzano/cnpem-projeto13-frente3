@@ -300,8 +300,34 @@ def test_conecta_com_client_id_credenciais_keepalive_e_sessao_limpa():
         assert (parametros["hostname"], parametros["port"]) == ("10.0.0.1", 1884)
         assert (parametros["username"], parametros["password"]) == ("u", "s")
         assert parametros["keepalive"] == 4
-        # Os mesmos parâmetros num cliente real: sem clean_session, o paho usa sessão limpa (MQTT 3.1.1)
+        # Os mesmos parâmetros num cliente real: o coletor usa sessão limpa (MQTT 3.1.1)
+        assert parametros["clean_session"] is True
         assert aiomqtt.Client(**parametros)._client._clean_session is True
+
+    asyncio.run(cenario())
+
+
+def test_coordenador_usa_sessao_persistente():
+    """As liberações publicadas enquanto o coordenador reinicia ficam guardadas no broker (RF19)."""
+    with ambiente():
+        broker = ConexaoBroker(cliente_id="coordenador")
+        Coordenador(broker, pulseiras=[PULSEIRA])
+        assert broker.sessao_persistente
+        assert not ConexaoBroker(cliente_id=COLETOR).sessao_persistente
+
+    async def cenario():
+        with ambiente(), cliente_mqtt_falso(["ok"]) as clientes:
+            persistente = ConexaoBroker(cliente_id="coordenador", sessao_persistente=True)
+            tarefa = asyncio.create_task(persistente.manter_conexao())
+            try:
+                await aguardar(lambda: persistente.conectado)
+            finally:
+                tarefa.cancel()
+                await asyncio.gather(tarefa, return_exceptions=True)
+
+        parametros = clientes[0].parametros
+        assert parametros["clean_session"] is False
+        assert aiomqtt.Client(**parametros)._client._clean_session is False
 
     asyncio.run(cenario())
 

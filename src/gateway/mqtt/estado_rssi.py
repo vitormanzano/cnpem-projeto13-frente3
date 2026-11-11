@@ -1,6 +1,8 @@
 import asyncio
+import dataclasses
 import logging
 import os
+from datetime import datetime, timezone
 
 from bluetooth.domain.erros import BrokerIndisponivel
 from bluetooth.domain.models import LeituraRSSI
@@ -61,9 +63,15 @@ class EstadoRssiColetor:
 
 
     async def republicar_ultima(self) -> None:
-        """Republica o último estado da pulseira. Chaamada a cada (re)conexão ao broker"""
+        """Republica o último estado da pulseira. Chamada a cada (re)conexão ao broker e quando o
+        coordenador republica a posse deste coletor (RF19).
+
+        Sai com o horário atual: é o estado de agora, e o coordenador descarta mensagens mais antigas
+        que a última recebida do coletor (RF13), como a presença e o sinal de vida publicados depois
+        da leitura original.
+        """
         if self._ultima is not None:
-            await self._publicar(self._ultima)
+            await self._publicar(dataclasses.replace(self._ultima, timestamp=datetime.now(timezone.utc)))
     
 
     def mensagem(self, leitura: LeituraRSSI) -> Mensagem:

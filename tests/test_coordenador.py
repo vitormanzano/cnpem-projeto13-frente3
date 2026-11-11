@@ -15,11 +15,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "gateway"))
 
-from bluetooth.domain.models import EstadoConexao  # noqa: E402
+from bluetooth.domain.models import EstadoConexao, LeituraRSSI  # noqa: E402
 from coletor.coletor import Coletor, ler_prazo_conexao  # noqa: E402
+from coletor.vigia_coordenador import VigiaCoordenador, ler_prazo_sinal_de_vida_coordenador  # noqa: E402
+from coordenador.conexao_fraca import ClassificacaoConexaoFraca  # noqa: E402
 from coordenador.coordenador import (  # noqa: E402
-    PRAZO_SINAL_DE_VIDA_PADRAO, Coordenador, ler_fator_extensao, ler_janela_disputa, ler_margem_histerese,
-    ler_minimo_amostras, ler_prazo_sinal_de_vida, ler_pulseiras_acompanhadas,
+    PRAZO_SINAL_DE_VIDA_PADRAO, Coordenador, ler_fator_extensao, ler_janela_disputa, ler_leituras_fracas,
+    ler_leituras_normais, ler_margem_histerese, ler_minimo_amostras, ler_prazo_liberacao, ler_prazo_sinal_de_vida,
+    ler_pulseiras_acompanhadas,
 )
 from coordenador.decisao import escolher_coletor  # noqa: E402
 from coordenador.visao import Candidato, VisaoColetores  # noqa: E402
@@ -136,6 +139,7 @@ def montar() -> tuple[Coordenador, BrokerFalso]:
     broker = BrokerFalso()
     coordenador = Coordenador(broker, pulseiras=[PULSEIRA], prazo_sinal_de_vida=PRAZO)
     coordenador.janela_disputa = 3600  # nenhuma disputa termina durante o teste
+    coordenador._reconstruindo = False  # como depois das retidas; a reconstrução tem testes próprios
     return coordenador, broker
 
 
@@ -664,7 +668,6 @@ def test_handoff_devolve_a_posse_a_origem_se_o_vencedor_nao_conectar():
                 coordenador, presenca(COLETOR_A, "online", 0), presenca(COLETOR_B, "online", 0), posse(COLETOR_A),
                 estado_rssi(COLETOR_A, 1, rssi=-85),  # conectado: a origem é a favorita
             )
-            coordenador._leituras_fracas[PULSEIRA] = coordenador.minimo_fracas
             with capturar_log() as log:
                 await coordenador._iniciar_handoff(PULSEIRA, COLETOR_A)
                 # Leitura de antes da liberação não entra na disputa (RF06)
@@ -731,6 +734,418 @@ def test_liberacao_controlada_libera_a_posse_com_log():
             assert any("Posse liberada" in r.getMessage() and COLETOR_A in r.getMessage() for r in log), log
         finally:
             await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+# ------------------------------------------------------------------ reinício do coordenador (RF19)
+
+def handoffs(broker: BrokerFalso) -> list[dict]:
+    return [mensagem.conteudo for _, mensagem in broker.publicadas if mensagem.tipo is TipoMensagem.HANDOFF]
+
+
+def montar_reinicio(prazo_conexao: float = 0.5) -> tuple[Coordenador, BrokerFalso]:
+    """Coordenador recém-iniciado: as retidas ainda estão chegando."""
+    coordenador, broker = montar_disputa(prazo_conexao=prazo_conexao)
+    coordenador._reconstruindo = True
+    return coordenador, broker
+
+
+def test_republica_a_posse_na_primeira_conexao_e_mantem_o_dono_que_conecta():
+    async def cenario():
+        coordenador, broker = montar_reinicio()
+        try:
+            await entregar(coordenador, presenca(COLETOR_A, "online", 0, pulseira=PULSEIRA), posse(COLETOR_A))
+            assert not broker.posses()  # nada é decidido antes de as retidas chegarem
+            with capturar_log() as log:
+                await coordenador._reconstruir(espera=0)
+                await aguardar(lambda: donos(broker) == [COLETOR_A])
+                await entregar(coordenador, estado_rssi(COLETOR_A, 1, rssi=-60))  # conectado
+                await aguardar(lambda: PULSEIRA not in coordenador._disputas)
+
+            assert donos(broker) == [COLETOR_A]
+            assert not coordenador._reconstruindo
+            assert any("Posse republicada" in r.getMessage() and COLETOR_A in r.getMessage() for r in log), log
+
+            # Reconexão ao broker: a visão em memória vale e nada é republicado
+            coordenador._reconstruindo = True
+            await coordenador._reconstruir(espera=0)
+            assert donos(broker) == [COLETOR_A] and PULSEIRA not in coordenador._disputas
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_republicacao_libera_a_posse_do_dono_que_soltou_a_pulseira_durante_o_reinicio():
+    async def cenario():
+        # O dono soltou (handoff ou reconexão esgotada) com o coordenador fora e a liberação se perdeu
+        coordenador, broker = montar_reinicio(prazo_conexao=0.05)
+        try:
+            await entregar(
+                coordenador, presenca(COLETOR_A, "online", 0), posse(COLETOR_A),
+                estado_rssi(COLETOR_A, 1, rssi=None, estado="desconectado"),
+            )
+            with capturar_log() as log:
+                await coordenador._reconstruir(espera=0)
+                await aguardar(lambda: donos(broker) == [COLETOR_A, None])
+            assert any("Posse liberada" in r.getMessage() and "não conectou" in r.getMessage() for r in log), log
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_sem_posse_retida_a_republicacao_sai_liberada():
+    async def cenario():
+        coordenador, broker = montar_reinicio()
+        try:
+            await coordenador._reconstruir(espera=0)
+            await aguardar(lambda: donos(broker) == [None])
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_liberacao_da_sessao_persistente_antes_da_posse_retida_libera_a_posse():
+    async def cenario():
+        coordenador, broker = montar_reinicio()
+        try:
+            with capturar_log() as log:
+                # A fila da sessão chega antes das retidas
+                await entregar(coordenador, presenca(COLETOR_A, "online", 0), liberacao(COLETOR_A, 1))
+                assert not broker.posses()
+                await entregar(coordenador, posse(COLETOR_A))
+            assert donos(broker) == [None]
+            mensagens = [r.getMessage() for r in log]
+            assert any("Liberação guardada" in m for m in mensagens), mensagens
+            assert any("Posse liberada" in m and "durante o reinício" in m for m in mensagens), mensagens
+
+            # Já liberada: a republicação confirma a posse liberada
+            await coordenador._reconstruir(espera=0)
+            await aguardar(lambda: donos(broker) == [None, None])
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_nenhuma_disputa_abre_enquanto_a_visao_e_reconstruida():
+    async def cenario():
+        coordenador, broker = montar()
+        coordenador._reconstruindo = True
+        try:
+            await entregar(coordenador, posse(None), presenca(COLETOR_A, "online", 0), varredura(COLETOR_A, 1, -60))
+            assert PULSEIRA not in coordenador._disputas
+            coordenador._reconstruindo = False
+            await entregar(coordenador, varredura(COLETOR_A, 2, -60))
+            assert PULSEIRA in coordenador._disputas
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_posse_retida_que_chega_durante_a_janela_encerra_a_disputa():
+    async def cenario():
+        coordenador, broker = montar_disputa()
+        try:
+            await entregar(coordenador, presenca(COLETOR_B, "online", 0), varredura(COLETOR_B, 1, -60))
+            assert PULSEIRA in coordenador._disputas  # posse ainda desconhecida
+            with capturar_log() as log:
+                await entregar(coordenador, posse(COLETOR_A))
+                await aguardar(lambda: PULSEIRA not in coordenador._disputas)
+            assert not broker.posses()
+            assert any("chegou durante a janela" in r.getMessage() for r in log), log
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+# ------------------------------------------------------------------ presença do coordenador (RF19)
+
+def test_coordenador_registra_ultima_vontade_offline_e_anuncia_online_retido():
+    broker = BrokerFalso()
+    coordenador = Coordenador(broker, pulseiras=[PULSEIRA])
+
+    vontade = broker.ultima_vontade
+    assert (vontade.topic, vontade.qos, vontade.retain) == (Topicos.presenca_coordenador(), 1, True)
+    assert Mensagem.de_json(vontade.payload).conteudo == {"estado": "offline"}
+
+    asyncio.run(coordenador.anunciar_online())
+    topico, mensagem = broker.publicadas[-1]
+    assert topico == Topicos.presenca_coordenador()
+    assert mensagem.conteudo == {"estado": "online"} and mensagem.config_entrega.retida
+
+
+# ------------------------------------------------------------------ conexao-fraca (RF19)
+
+def test_classificacao_entra_por_leituras_seguidas_e_sai_pela_mediana():
+    c = ClassificacaoConexaoFraca(limiar=-78, leituras_fracas=3, leituras_normais=3)
+    # -77 está acima do limiar e zera a contagem
+    assert [c.registrar(r) for r in (-80, -79, -77, -80, -81)] == [False] * 5 and not c.fraca
+    assert c.registrar(-82) and c.fraca
+
+    # Uma leitura boa isolada não tira de conexao-fraca: vale a mediana das 3 últimas
+    assert [c.registrar(r) for r in (-60, -85, -90, -70)] == [False] * 4 and c.fraca
+    assert c.registrar(-70) and not c.fraca  # mediana de (-90, -70, -70) = -70
+    assert c.mediana == -70
+
+    # Mediana igual ao limiar não está "acima"
+    c.reiniciar()
+    for r in (-80, -80, -80):
+        c.registrar(r)
+    assert [c.registrar(-78) for _ in range(3)] == [False] * 3 and c.fraca
+
+
+def test_leituras_fracas_do_dono_iniciam_o_handoff():
+    async def cenario():
+        coordenador, broker = montar()
+        coordenador.limiar, coordenador.leituras_fracas = -78, 3
+        coordenador.prazo_liberacao = 3600  # o handoff fica esperando a liberação
+        try:
+            await entregar(coordenador, presenca(COLETOR_A, "online", 0), presenca(COLETOR_B, "online", 0), posse(COLETOR_A))
+            with capturar_log() as log:
+                await entregar(
+                    coordenador,
+                    estado_rssi(COLETOR_A, 1, rssi=-80),
+                    estado_rssi(COLETOR_A, 2, rssi=-78),    # igual ao limiar: não é fraca e zera
+                    estado_rssi(COLETOR_B, 2, rssi=-95, estado="desconectado", amostras=10),  # não é o dono
+                    estado_rssi(COLETOR_A, 3, rssi=-80),
+                    estado_rssi(COLETOR_A, 4, rssi=None),   # RSSI ilegível: não conta nem zera
+                    estado_rssi(COLETOR_A, 5, rssi=-85),
+                )
+                assert not handoffs(broker)
+                await entregar(coordenador, estado_rssi(COLETOR_A, 6, rssi=-90))
+
+            assert [h["origem"] for h in handoffs(broker)] == [COLETOR_A]
+            assert any("Estado: conexao-fraca" in r.getMessage() for r in log), log
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_handoff_cancelado_exige_novas_leituras_fracas():
+    async def cenario():
+        coordenador, broker = montar()
+        coordenador.limiar, coordenador.leituras_fracas = -78, 3
+        coordenador.prazo_liberacao = 0.01  # a origem não libera a tempo
+        try:
+            await entregar(coordenador, presenca(COLETOR_A, "online", 0), posse(COLETOR_A))
+            with capturar_log():
+                await entregar(coordenador, *(estado_rssi(COLETOR_A, t, rssi=-85) for t in (1, 2, 3)))
+                await aguardar(lambda: PULSEIRA not in coordenador._disputas)  # cancelado
+                await entregar(coordenador, *(estado_rssi(COLETOR_A, t, rssi=-85) for t in (4, 5)))
+                assert len(handoffs(broker)) == 1
+                await entregar(coordenador, estado_rssi(COLETOR_A, 6, rssi=-85))
+            assert len(handoffs(broker)) == 2
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_configuracao_da_conexao_fraca_e_do_handoff():
+    with ambiente(LEITURAS_FRACAS="", LEITURAS_NORMAIS="", PRAZO_LIBERACAO=""):
+        assert (ler_leituras_fracas(), ler_leituras_normais(), ler_prazo_liberacao()) == (3, 3, 3.0)
+    with ambiente(LEITURAS_FRACAS="5", LEITURAS_NORMAIS="4", PRAZO_LIBERACAO="2.5"):
+        assert (ler_leituras_fracas(), ler_leituras_normais(), ler_prazo_liberacao()) == (5, 4, 2.5)
+
+    invalidas = [
+        ("LEITURAS_FRACAS", "0"), ("LEITURAS_FRACAS", "-1"), ("LEITURAS_FRACAS", "2.5"),
+        ("LEITURAS_NORMAIS", "0"), ("PRAZO_LIBERACAO", "0"), ("PRAZO_LIBERACAO", "x"),
+        ("PRESENCA_INTERVALO_COORDENADOR", "x"),
+    ]
+    for variavel, valor in invalidas:
+        with ambiente(**{variavel: valor}):
+            try:
+                Coordenador(BrokerFalso(), pulseiras=[PULSEIRA])
+            except ValueError as e:
+                assert variavel in str(e), e
+            else:
+                raise AssertionError(f"aceitou {variavel}={valor!r}")
+
+
+# ------------------------------------------------------------------ avisos (RF19)
+
+def test_disputa_sem_vencedor_e_coletor_offline_sao_avisos():
+    async def cenario():
+        coordenador, _ = montar_disputa(janela=0.01)
+        try:
+            await entregar(coordenador, posse(None), presenca(COLETOR_A, "online", 0))
+            with capturar_log() as log:
+                await coordenador._encerrar_disputa(PULSEIRA, time.monotonic())
+                await entregar(coordenador, presenca(COLETOR_A, "offline", 1))
+            avisos = [r.getMessage() for r in log if r.levelno == logging.WARNING]
+            assert any("Disputa sem vencedor" in m for m in avisos), avisos
+            assert any("Coletor indisponível" in m and "presença offline" in m for m in avisos), avisos
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+# ------------------------------------------------------------------ só o coordenador decide a posse (RF19)
+
+async def esperar_para_sempre() -> None:
+    await asyncio.sleep(3600)
+
+
+def montar_coletor() -> tuple[Coletor, BrokerFalso]:
+    broker = BrokerFalso(COLETOR_A)
+    coletor = Coletor(broker, PULSEIRA, id_coordenador=COORDENADOR)
+    coletor.varredura.executar = esperar_para_sempre
+    coletor._manter_sessao = esperar_para_sempre
+    return coletor, broker
+
+
+async def desmontar_coletor(coletor: Coletor) -> None:
+    await coletor._parar_varredura()
+    tarefas = [*coletor._esperas_conexao, *([coletor._sessao] if coletor._sessao else [])]
+    for tarefa in tarefas:
+        tarefa.cancel()
+    await asyncio.gather(*tarefas, return_exceptions=True)
+
+
+def test_posse_de_outra_origem_e_ignorada_pelo_coordenador():
+    async def cenario():
+        coordenador, broker = montar()
+        intrusa = Mensagem(TipoMensagem.POSSE, "painel-coordenador-simulado", {"pulseira": PULSEIRA, "coletor": COLETOR_A})
+        with capturar_log() as log:
+            await coordenador.ao_receber(Topicos.estado_posse(PULSEIRA), intrusa)
+        assert PULSEIRA not in coordenador.visao.posse
+        assert any("Posse descartada" in r.getMessage() and "painel-coordenador-simulado" in r.getMessage() for r in log)
+
+    asyncio.run(cenario())
+
+
+def test_coletor_so_aceita_posse_e_handoff_do_coordenador():
+    async def cenario():
+        coletor, broker = montar_coletor()
+        try:
+            def de(origem: str, tipo: TipoMensagem, conteudo: dict) -> Mensagem:
+                return Mensagem(tipo, origem, conteudo)
+
+            with capturar_log() as log:
+                await coletor.ao_receber(
+                    Topicos.estado_posse(PULSEIRA), de("intruso", TipoMensagem.POSSE, {"pulseira": PULSEIRA, "coletor": COLETOR_A}),
+                )
+            assert coletor._sessao is None
+            assert any("Mensagem ignorada" in r.getMessage() and "intruso" in r.getMessage() for r in log), log
+
+            await coletor.ao_receber(*posse(COLETOR_A))
+            assert coletor._sessao is not None
+
+            handoff = {"id": "ab12", "pulseira": PULSEIRA, "origem": COLETOR_A}
+            with capturar_log():
+                await coletor.ao_receber(Topicos.handoff(PULSEIRA), de("intruso", TipoMensagem.HANDOFF, handoff))
+            assert coletor._sessao is not None
+            assert not [m for _, m in broker.publicadas if m.tipo is TipoMensagem.LIBERACAO_POSSE]
+        finally:
+            await desmontar_coletor(coletor)
+
+    asyncio.run(cenario())
+
+
+def test_coletor_republica_o_estado_conectado_quando_recebe_de_novo_a_propria_posse():
+    async def cenario():
+        coletor, broker = montar_coletor()
+        try:
+            await coletor.ao_receber(*posse(COLETOR_A))
+            coletor._ao_atualizar_conexao(LeituraRSSI(PULSEIRA, EstadoConexao.CONECTADO, -60, timestamp=ts(0)))
+            assert not [m for _, m in broker.publicadas if m.tipo is TipoMensagem.ESTADO_PULSEIRA]
+
+            await coletor.ao_receber(*posse(COLETOR_A))  # coordenador reiniciou e republicou a posse
+            estados = [m for _, m in broker.publicadas if m.tipo is TipoMensagem.ESTADO_PULSEIRA]
+            assert [m.conteudo["estado"] for m in estados] == ["conectado"]
+            # Com o horário de agora: a leitura original seria mais antiga que o sinal de vida (RF13)
+            assert estados[0].timestamp > ts(0)
+        finally:
+            await desmontar_coletor(coletor)
+
+    asyncio.run(cenario())
+
+
+# ------------------------------------------------------------------ coordenador indisponível (RF19)
+
+def test_vigia_do_coordenador_por_presenca_e_sinal_de_vida():
+    vigia = VigiaCoordenador(prazo=15)
+    vigia.reiniciar_contagem(agora=0)
+    with capturar_log() as log:
+        vigia.registrar_presenca(True, agora=0)
+        assert vigia.disponivel
+        vigia.registrar_sinal_de_vida(agora=10)
+        vigia.verificar(agora=24)
+        assert vigia.disponivel
+        vigia.verificar(agora=26)
+        assert not vigia.disponivel
+        vigia.verificar(agora=40)  # o aviso não se repete
+        vigia.registrar_sinal_de_vida(agora=41)
+        assert vigia.disponivel
+        vigia.registrar_presenca(False)
+        assert not vigia.disponivel
+        vigia.registrar_sinal_de_vida(agora=42)  # sinal atrasado não desfaz o offline
+        assert not vigia.disponivel
+        vigia.registrar_presenca(True, agora=43)
+        assert vigia.disponivel
+
+    avisos = [r.getMessage() for r in log if r.levelno == logging.WARNING]
+    assert len(avisos) == 2, avisos
+    assert "sem sinal de vida há mais de 15 s" in avisos[0] and "presença offline" in avisos[1]
+
+
+def test_vigia_nao_conta_o_tempo_sem_broker_e_avisa_coordenador_que_nunca_apareceu():
+    vigia = VigiaCoordenador(prazo=15)
+    vigia.reiniciar_contagem(agora=0)
+    vigia.registrar_presenca(True, agora=0)
+    vigia.pausar()
+    vigia.verificar(agora=100)
+    assert vigia.disponivel
+    vigia.reiniciar_contagem(agora=100)
+    vigia.verificar(agora=110)
+    assert vigia.disponivel
+
+    nunca = VigiaCoordenador(prazo=15)
+    nunca.reiniciar_contagem(agora=0)
+    with capturar_log():
+        nunca.verificar(agora=16)
+    assert not nunca.disponivel
+
+
+def test_prazo_do_coordenador_padrao_por_ambiente_e_invalido():
+    with ambiente(PRAZO_SINAL_DE_VIDA_COORDENADOR=""):
+        assert ler_prazo_sinal_de_vida_coordenador() == 15.0
+    with ambiente(PRAZO_SINAL_DE_VIDA_COORDENADOR="20"):
+        assert ler_prazo_sinal_de_vida_coordenador() == 20.0
+    for valor in ("x", "0"):
+        with ambiente(PRAZO_SINAL_DE_VIDA_COORDENADOR=valor):
+            try:
+                ler_prazo_sinal_de_vida_coordenador()
+            except ValueError as e:
+                assert "PRAZO_SINAL_DE_VIDA_COORDENADOR" in str(e), e
+            else:
+                raise AssertionError(f"aceitou {valor!r}")
+
+
+def test_coletor_acompanha_o_coordenador_so_pela_origem_configurada():
+    async def cenario():
+        coletor, _ = montar_coletor()
+        try:
+            def do_coordenador(origem: str, estado: str) -> Mensagem:
+                return Mensagem(TipoMensagem.PRESENCA, origem, {"estado": estado})
+
+            with capturar_log():
+                await coletor.ao_receber(Topicos.presenca_coordenador(), do_coordenador("intruso", "online"))
+                assert not coletor.vigia_coordenador.disponivel
+                await coletor.ao_receber(Topicos.presenca_coordenador(), do_coordenador(COORDENADOR, "online"))
+                assert coletor.vigia_coordenador.disponivel
+                await coletor.ao_receber(Topicos.presenca_coordenador(), do_coordenador(COORDENADOR, "offline"))
+                assert not coletor.vigia_coordenador.disponivel
+        finally:
+            await desmontar_coletor(coletor)
 
     asyncio.run(cenario())
 

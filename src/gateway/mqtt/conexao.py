@@ -76,6 +76,7 @@ class ConexaoBroker:
         ao_conectar: TratadorConexao | None = None,
         keepalive: float | None = None,
         ao_desconectar: TratadorConexao | None = None,
+        sessao_persistente: bool = False,
     ) -> None:
         """
         Args:
@@ -96,6 +97,9 @@ class ConexaoBroker:
                 pelo seu intervalo. Não tem variável própria para não divergir do sinal de vida.
             ao_desconectar (TratadorConexao | None): Função chamada quando uma sessão ativa cai.
                 Não é chamada nas tentativas de conexão que falham nem no encerramento.
+            sessao_persistente (bool): Se True, o broker guarda as assinaturas e as mensagens QoS 1
+                que chegarem enquanto o cliente estiver fora, e as entrega na reconexão. Usada pelo
+                coordenador (RF19); o coletor usa sessão limpa.
 
         Raises:
             ValueError: Se a porta ou o intervalo de reconexão forem inválidos.
@@ -107,6 +111,7 @@ class ConexaoBroker:
         self.senha = senha or os.getenv("BROKER_SENHA") or None
         self.intervalo_reconexao = ler_intervalo_reconexao_broker(intervalo_reconexao)
         self.keepalive = keepalive if keepalive is not None else KEEPALIVE_PADRAO
+        self.sessao_persistente = sessao_persistente
         self.ao_receber = ao_receber
         self.ultima_vontade = ultima_vontade
         self._ao_conectar: list[TratadorConexao] = [ao_conectar] if ao_conectar else []
@@ -191,6 +196,7 @@ class ConexaoBroker:
                     password=self.senha,
                     will=self.ultima_vontade,
                     keepalive=self.keepalive_mqtt,
+                    clean_session=not self.sessao_persistente,
                 ) as client:
                     self._client = client
                     logging.info(
