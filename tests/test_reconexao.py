@@ -6,6 +6,7 @@ Rodar na raiz do projeto:  python tests/test_reconexao.py
 import asyncio
 import os
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -36,6 +37,7 @@ class ConexaoFalsa:
         self.estado = EstadoConexao.DESCONECTADO
         self.falhar_assinatura_fc = False
         self.chamadas_conectar = 0
+        self.inicios_conectar: list[float] = []
         self.conexoes_ok = 0
         self.assinaturas_fc = 0
         self.monitores_rssi = 0
@@ -52,6 +54,7 @@ class ConexaoFalsa:
 
     async def conectar(self) -> None:
         self.chamadas_conectar += 1
+        self.inicios_conectar.append(time.monotonic())
         resultado = self._roteiro.pop(0)
         if resultado == "falha":
             raise FalhaConexao("dispositivo ausente")
@@ -178,6 +181,24 @@ def test_esgota_as_tentativas_e_informa_a_falha():
 
         assert conexao.chamadas_conectar == 4  # 1 conexão inicial + 3 tentativas
         assert conexao.estado is EstadoConexao.DESCONECTADO
+
+    asyncio.run(cenario())
+
+
+def test_intervalo_entre_as_tentativas_e_respeitado():
+    async def cenario():
+        conexao = ConexaoFalsa(["ok", "falha", "falha", "ok"])
+        tarefa = asyncio.create_task(manter_conexao(conexao, max_tentativas=3, intervalo=0.05))
+        await aguardar(lambda: conexao.monitores_rssi == 1)
+
+        conexao.derrubar()
+        await aguardar(lambda: conexao.conexoes_ok == 2)
+        tentativas = conexao.inicios_conectar[1:]
+        passos = [depois - antes for antes, depois in zip(tentativas, tentativas[1:])]
+        assert len(passos) == 2 and all(passo >= 0.05 for passo in passos), passos
+
+        conexao.derrubar(intencional=True)
+        await asyncio.wait_for(tarefa, 2.0)
 
     asyncio.run(cenario())
 

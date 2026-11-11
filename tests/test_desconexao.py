@@ -1,9 +1,11 @@
-"""Testes da desconexão controlada (RF10), sem hardware e sem broker.
+"""Testes da desconexão controlada (RF10) e da liberação após a reconexão esgotada (RF05),
+sem hardware e sem broker.
 
 Rodar na raiz do projeto:  python tests/test_desconexao.py
 (também funciona com pytest)
 """
 import asyncio
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -33,6 +35,9 @@ class BrokerFalso:
         self.publicadas: list[str] = []
 
     def adicionar_ao_conectar(self, _tratador: Callable) -> None:
+        pass
+
+    def adicionar_ao_desconectar(self, _tratador: Callable) -> None:
         pass
 
     async def assinar(self, _topico: str, qos: int = 1) -> None:
@@ -113,6 +118,8 @@ async def aguardar(condicao: Callable[[], bool], tempo: float = 2.0) -> None:
 
 
 async def receber_posse(coletor: Coletor) -> None:
+    # Como no app, o executar() começa antes: senão a varredura inicial nasceria com a sessão ativa
+    await asyncio.sleep(0)
     posse = Mensagem(TipoMensagem.POSSE, "coordenador", {"pulseira": ENDERECO, "coletor": COLETOR})
     await coletor.ao_receber(Topicos.estado_posse(ENDERECO), posse)
     await aguardar(lambda: coletor.conexao.conectado)
@@ -172,6 +179,54 @@ def test_rssi_esgotado_durante_a_desconexao_intencional_nao_reconecta():
         assert conexao.estado is EstadoConexao.DESCONECTADO
 
     asyncio.run(cenario())
+
+
+def test_reconexao_esgotada_publica_o_estado_antes_da_liberacao_e_volta_a_varrer():
+    async def cenario():
+        coletor, broker, chamadas = montar_coletor()
+        coletor._tentativas_reconexao, coletor._intervalo_reconexao = 2, 0
+        conexao = coletor.conexao
+        conectar_ok = conexao.conectar
+
+        async def conectar() -> None:
+            if chamadas["conectar"] == 0:
+                await conectar_ok()
+                return
+            chamadas["conectar"] += 1  # a pulseira sumiu depois da primeira conexão
+            raise conexao._registrar_falha("dispositivo ausente", EstadoConexao.NAO_ENCONTRADO)
+
+        conexao.conectar = conectar
+        principal = asyncio.create_task(coletor.executar())
+        try:
+            await receber_posse(coletor)
+            cliente = conexao._client
+            cliente.is_connected = False
+            conexao._ao_desconectar(cliente)  # queda inesperada
+            await aguardar(lambda: coletor._varredura is not None)
+
+            assert chamadas["conectar"] == 3  # 1 conexão + 2 tentativas
+            assert broker.publicadas[-2:] == ["estado-pulseira:nao-encontrado", "liberacao-posse"], broker.publicadas
+            assert not coletor._varredura.done()
+        finally:
+            principal.cancel()
+            await asyncio.gather(principal, return_exceptions=True)
+
+    asyncio.run(cenario())
+
+
+def test_configuracao_de_reconexao_invalida_falha_na_inicializacao():
+    antes = os.environ.get("RECONEXAO_MAX_TENTATIVAS")
+    os.environ["RECONEXAO_MAX_TENTATIVAS"] = "0"
+    try:
+        Coletor(BrokerFalso(), ENDERECO)
+    except ValueError:
+        return
+    finally:
+        if antes is None:
+            os.environ.pop("RECONEXAO_MAX_TENTATIVAS", None)
+        else:
+            os.environ["RECONEXAO_MAX_TENTATIVAS"] = antes
+    raise AssertionError("deveria rejeitar a configuração ao criar o Coletor, não ao receber a posse")
 
 
 if __name__ == "__main__":
