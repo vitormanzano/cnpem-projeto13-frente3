@@ -80,6 +80,7 @@ Exemplos de filtro para trocar no `-t`:
 |---|---|
 | `'#'` | tudo (exceto tópicos internos do broker, que começam com `$`) |
 | `'coletores/+/presenca'` | presença de todos os coletores |
+| `'coletores/+/sinal-de-vida'` | sinal de vida de todos os coletores |
 | `'coletores/<id>/#'` | tudo de um coletor |
 | `'coletores/+/pulseiras/+'` | estado/RSSI de todos os coletores para todas as pulseiras |
 | `'pulseiras/+/posse'` | posse de todas as pulseiras |
@@ -124,11 +125,11 @@ Uma linha por mensagem, por exemplo:
 2026-11-05T14:40:01 | coletores/<hostname>/presenca | retida=1 | {"versao": ..., "tipo": "presenca", "origem": "<hostname>", ..., "conteudo": {"estado": "online", "pulseira": null}}
 ```
 
-| Momento | Mensagem esperada em `coletores/<hostname>/presenca` |
+| Momento | Mensagem esperada |
 |---|---|
-| Coletor conecta | `"estado": "online"` |
-| A cada `PRESENCA_INTERVALO_COLETOR` segundos (padrão 5 s) | `"estado": "online"` (sinal de vida) |
-| Ctrl+C ou `docker stop` no coletor | `"estado": "offline"`, e o log do coletor mostra `Coletor encerrado.` |
+| Coletor conecta | `coletores/<hostname>/presenca`, retida: `"estado": "online"` |
+| A cada `PRESENCA_INTERVALO_COLETOR` segundos (padrão 5 s) | `coletores/<hostname>/sinal-de-vida`, não retida: `"tipo": "sinal-de-vida"`, `"conteudo": {}` |
+| Ctrl+C ou `docker stop` no coletor | `coletores/<hostname>/presenca`, retida: `"estado": "offline"`, e o log do coletor mostra `Coletor encerrado.` |
 
 Logo que o espião conecta, chegam também as **mensagens retidas** de execuções anteriores (`retida=1`). Por isso aparece o último estado de cada coletor, inclusive de ids que não existem mais.
 

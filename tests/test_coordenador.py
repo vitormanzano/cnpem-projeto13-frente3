@@ -22,7 +22,7 @@ from coordenador.conexao_fraca import ClassificacaoConexaoFraca  # noqa: E402
 from coordenador.coordenador import (  # noqa: E402
     PRAZO_SINAL_DE_VIDA_PADRAO, Coordenador, ler_fator_extensao, ler_janela_disputa, ler_leituras_fracas,
     ler_leituras_normais, ler_margem_histerese, ler_minimo_amostras, ler_prazo_liberacao, ler_prazo_sinal_de_vida,
-    ler_pulseiras_acompanhadas,
+    ler_pulseiras_acompanhadas, ler_carencia_handoff, _Handoff,
 )
 from coordenador.decisao import escolher_coletor  # noqa: E402
 from coordenador.visao import Candidato, VisaoColetores  # noqa: E402
@@ -948,15 +948,150 @@ def test_handoff_cancelado_exige_novas_leituras_fracas():
     asyncio.run(cenario())
 
 
+def montar_handoff(prazo_conexao: float = 0.5) -> tuple[Coordenador, BrokerFalso]:
+    """Coletores A (dono, conectado) e B online, com disputa curta e conexao-fraca em 3 leituras < -78 dBm."""
+    coordenador, broker = montar_disputa(prazo_conexao=prazo_conexao)
+    coordenador.limiar, coordenador.leituras_fracas, coordenador.margem = -78, 3, 5
+    return coordenador, broker
+
+
+async def preparar_handoff(coordenador: Coordenador) -> None:
+    await entregar(
+        coordenador, presenca(COLETOR_A, "online", 0), presenca(COLETOR_B, "online", 0), posse(COLETOR_A),
+        estado_rssi(COLETOR_A, 1, rssi=-85),
+    )
+
+
+def concluidos(log: list[logging.LogRecord]) -> list[logging.LogRecord]:
+    return [r for r in log if "Handoff concluído" in r.getMessage()]
+
+
+def test_handoff_para_outro_coletor_registra_resultado_e_lacuna():
+    async def cenario():
+        coordenador, broker = montar_handoff()
+        try:
+            await preparar_handoff(coordenador)
+            with capturar_log() as log:
+                await coordenador._iniciar_handoff(PULSEIRA, COLETOR_A)
+                id_handoff = handoffs(broker)[-1]["id"]
+                await entregar(
+                    coordenador, liberacao(COLETOR_A, 2), varredura(COLETOR_A, 3, -80), varredura(COLETOR_B, 3, -60),
+                )
+                await aguardar(lambda: donos(broker) == [None, COLETOR_B])
+                await entregar(coordenador, estado_rssi(COLETOR_B, 4, rssi=-60))  # o vencedor conecta
+                await aguardar(lambda: PULSEIRA not in coordenador._disputas)
+
+            [resultado] = concluidos(log)
+            mensagem = resultado.getMessage()
+            assert resultado.levelno == logging.INFO, mensagem
+            for trecho in (f"Id: {id_handoff}", f"Origem: {COLETOR_A}", f"Vencedor: {COLETOR_B}",
+                           f"Conectado: {COLETOR_B}", f"{COLETOR_A}: -80.0 dBm", f"{COLETOR_B}: -60.0 dBm", "Lacuna:"):
+                assert trecho in mensagem, (trecho, mensagem)
+            assert PULSEIRA not in coordenador._carencias  # a origem perdeu: sem carência
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_origem_que_vence_o_handoff_tem_carencia_antes_de_outro():
+    async def cenario():
+        coordenador, broker = montar_handoff()
+        coordenador.carencia_handoff = 0.3
+        try:
+            await preparar_handoff(coordenador)
+            with capturar_log() as log:
+                await coordenador._iniciar_handoff(PULSEIRA, COLETOR_A)
+                # B é melhor, mas não pela margem: a origem favorita vence
+                await entregar(
+                    coordenador, liberacao(COLETOR_A, 2), varredura(COLETOR_A, 3, -62), varredura(COLETOR_B, 3, -60),
+                )
+                await aguardar(lambda: donos(broker) == [None, COLETOR_A])
+                await entregar(coordenador, estado_rssi(COLETOR_A, 4, rssi=-85))  # a origem reconecta
+                await aguardar(lambda: PULSEIRA not in coordenador._disputas)
+                assert concluidos(log) and f"Vencedor: {COLETOR_A}" in concluidos(log)[0].getMessage()
+
+                # Ainda fraca, mas dentro da carência: nenhum handoff novo
+                coordenador.prazo_liberacao = 3600  # o próximo handoff fica esperando a liberação
+                await entregar(coordenador, *(estado_rssi(COLETOR_A, t, rssi=-85) for t in (5, 6, 7)))
+                assert len(handoffs(broker)) == 1
+                assert any("Handoff adiado" in r.getMessage() for r in log), log
+
+                # Fim da carência: novas leituras fracas iniciam outro handoff
+                await asyncio.sleep(coordenador.carencia_handoff)
+                await entregar(coordenador, *(estado_rssi(COLETOR_A, t, rssi=-85) for t in (8, 9, 10)))
+            assert len(handoffs(broker)) == 2
+            assert PULSEIRA not in coordenador._carencias
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_carencia_vale_so_para_a_origem_que_venceu():
+    coordenador, _ = montar()
+    coordenador._carencias[PULSEIRA] = (COLETOR_A, time.monotonic() + 60)
+    with capturar_log():
+        assert coordenador._em_carencia(PULSEIRA, COLETOR_A)
+        assert not coordenador._em_carencia(PULSEIRA, COLETOR_B)  # outro dono, outra conexão
+    assert PULSEIRA not in coordenador._carencias
+
+
+def test_origem_que_tambem_nao_conecta_libera_a_posse_e_registra_handoff_sem_conexao():
+    async def cenario():
+        coordenador, broker = montar_handoff(prazo_conexao=0.05)
+        try:
+            await preparar_handoff(coordenador)
+            with capturar_log() as log:
+                await coordenador._iniciar_handoff(PULSEIRA, COLETOR_A)
+                await entregar(
+                    coordenador, liberacao(COLETOR_A, 2), varredura(COLETOR_A, 3, -80), varredura(COLETOR_B, 3, -60),
+                )
+                await aguardar(lambda: PULSEIRA not in coordenador._disputas)
+
+            assert donos(broker) == [None, COLETOR_B, COLETOR_A, None]
+            [resultado] = concluidos(log)
+            assert resultado.levelno == logging.WARNING
+            assert "Conectado: nenhum" in resultado.getMessage() and "sem coletor conectado" in resultado.getMessage()
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_lacuna_acima_da_meta_do_rnf04_gera_aviso():
+    coordenador, _ = montar()
+    candidatos = {COLETOR_B: Candidato(-60.0, 10, 101.0)}
+
+    def concluir(conectado_em: float) -> logging.LogRecord:
+        handoff = _Handoff(
+            "ab12", COLETOR_A, liberada_em=100.0, candidatos=candidatos,
+            vencedor=COLETOR_B, conectado=COLETOR_B, conectado_em=conectado_em,
+        )
+        with capturar_log() as log:
+            coordenador._concluir_handoff(PULSEIRA, handoff)
+        return concluidos(log)[0]
+
+    dentro = concluir(108.0)
+    assert dentro.levelno == logging.INFO and "Lacuna: 8.0 s" in dentro.getMessage()
+    acima = concluir(125.0)
+    assert acima.levelno == logging.WARNING
+    assert "Lacuna: 25.0 s" in acima.getMessage() and "RNF04" in acima.getMessage()
+
+
 def test_configuracao_da_conexao_fraca_e_do_handoff():
-    with ambiente(LEITURAS_FRACAS="", LEITURAS_NORMAIS="", PRAZO_LIBERACAO=""):
-        assert (ler_leituras_fracas(), ler_leituras_normais(), ler_prazo_liberacao()) == (3, 3, 3.0)
-    with ambiente(LEITURAS_FRACAS="5", LEITURAS_NORMAIS="4", PRAZO_LIBERACAO="2.5"):
+    with ambiente(LEITURAS_FRACAS="", LEITURAS_NORMAIS="", PRAZO_LIBERACAO="", CARENCIA_HANDOFF=""):
+        assert (ler_leituras_fracas(), ler_leituras_normais(), ler_prazo_liberacao()) == (3, 3, 5.0)
+        assert ler_carencia_handoff() == 30.0
+    with ambiente(LEITURAS_FRACAS="5", LEITURAS_NORMAIS="4", PRAZO_LIBERACAO="2.5", CARENCIA_HANDOFF="0"):
         assert (ler_leituras_fracas(), ler_leituras_normais(), ler_prazo_liberacao()) == (5, 4, 2.5)
+        assert ler_carencia_handoff() == 0.0  # zero desliga a carência
+        assert ler_carencia_handoff(12) == 12  # argumento explícito vence o ambiente
 
     invalidas = [
         ("LEITURAS_FRACAS", "0"), ("LEITURAS_FRACAS", "-1"), ("LEITURAS_FRACAS", "2.5"),
         ("LEITURAS_NORMAIS", "0"), ("PRAZO_LIBERACAO", "0"), ("PRAZO_LIBERACAO", "x"),
+        ("CARENCIA_HANDOFF", "-1"), ("CARENCIA_HANDOFF", "x"),
         ("PRESENCA_INTERVALO_COORDENADOR", "x"),
     ]
     for variavel, valor in invalidas:

@@ -16,7 +16,7 @@ from coordenador.conexao_fraca import (
     LEITURAS_FRACAS_PADRAO, LEITURAS_NORMAIS_PADRAO, LIMIAR_CONEXAO_FRACA_PADRAO, ClassificacaoConexaoFraca,
 )
 from coordenador.decisao import MARGEM_HISTERESE_PADRAO, escolher_coletor
-from coordenador.visao import MINIMO_AMOSTRAS_PADRAO, SinalColetor, VisaoColetores
+from coordenador.visao import MINIMO_AMOSTRAS_PADRAO, Candidato, SinalColetor, VisaoColetores
 from mqtt.conexao import ConexaoBroker
 from mqtt.domain.models import EstadoPresenca, Mensagem, TipoMensagem
 from mqtt.domain.topicos import Topicos
@@ -26,7 +26,9 @@ INTERVALO_SINAL_DE_VIDA_PADRAO = 5.0
 JANELA_DISPUTA_PADRAO          = 3.0 # A mesma na disputa e no handoff (RF14)
 FATOR_EXTENSAO_JANELA_PADRAO   = 3.0 # Sem sinal válido, a janela vai até janela * fator
 INTERVALO_VERFICACAO           = 0.5 # s entre verificações durante a extensão
-PRAZO_LIBERACAO_PADRAO         = 3.0 # s para a origem confirmar que soltou
+PRAZO_LIBERACAO_PADRAO         = 5.0 # s para a origem confirmar que soltou
+CARENCIA_HANDOFF_PADRAO        = 30.0 # s sem novo handoff da mesma origem depois que ela vence a disputa (RF06)
+META_LACUNA_HANDOFF            = 20.0 # s sem conexão por handoff; acima disso, aviso no log (RNF04)
 PRAZO_SINAL_DE_VIDA_PADRAO     = 15.0 # s sem mensagem até o coletor ficar indisponível (RF13)
 INTERVALO_VERIFICACAO_COLETORES = 1.0 # s entre as verificações de sinal de vida e posse órfã
 # s depois de cada conexão ao broker para receber as retidas e a fila da sessão persistente antes
@@ -220,7 +222,7 @@ def ler_prazo_liberacao(prazo: float | None = None) -> float:
     """Resolve o prazo para a origem do handoff publicar a liberação (RF06).
 
     Args:
-        prazo (float | None): Segundos. Se omitido, é lido de PRAZO_LIBERACAO (padrão de 3 s).
+        prazo (float | None): Segundos. Se omitido, é lido de PRAZO_LIBERACAO (padrão de 5 s).
 
     Raises:
         ValueError: Se não for um número maior que zero.
@@ -230,6 +232,23 @@ def ler_prazo_liberacao(prazo: float | None = None) -> float:
     if prazo <= 0:
         raise ValueError("PRAZO_LIBERACAO deve ser maior que zero.")
     return prazo
+
+
+def ler_carencia_handoff(carencia: float | None = None) -> float:
+    """Resolve por quanto tempo a origem que venceu a disputa do handoff não sofre outro (RF06).
+
+    Args:
+        carencia (float | None): Segundos. Se omitido, é lido de CARENCIA_HANDOFF (padrão de 30 s).
+            Zero desliga a carência.
+
+    Raises:
+        ValueError: Se não for um número maior ou igual a zero.
+    """
+    if carencia is None:
+        carencia = _numero_do_ambiente("CARENCIA_HANDOFF", CARENCIA_HANDOFF_PADRAO)
+    if carencia < 0:
+        raise ValueError("CARENCIA_HANDOFF não pode ser negativa.")
+    return carencia
 
 
 def ler_limiar_conexao_fraca(limiar: int | None = None) -> int:
@@ -270,6 +289,14 @@ def _inteiro(valor: object, campo: str, nulo: bool = False) -> int | None:
     return valor
 
 
+def _resumir_candidatos(candidatos: dict[str, Candidato]) -> str:
+    """RSSI suavizado e amostras de cada candidato da disputa, para o log (RF06, RF14)."""
+    return ", ".join(
+        f"{coletor}: {candidato.rssi_suavizado:.1f} dBm ({candidato.amostras} amostras)"
+        for coletor, candidato in candidatos.items()
+    )
+
+
 @dataclass
 class _Espera:
     """Resposta que o coordenador aguarda de um coletor: a liberação no handoff (RF06) ou o
@@ -286,6 +313,18 @@ class _Espera:
             return
         self.sucesso, self.em = sucesso, time.monotonic()
         self.fim.set()
+
+
+@dataclass
+class _Handoff:
+    """Um handoff em andamento e o que o log do resultado precisa (RF06)."""
+    id: str
+    origem: str
+    liberada_em: float = 0.0  # time.monotonic() da liberação: início da lacuna de dados (RNF04)
+    candidatos: dict[str, Candidato] = field(default_factory=dict)
+    vencedor: str | None = None
+    conectado: str | None = None  # Quem ficou conectado ao fim: o vencedor ou a origem que recebeu a posse de volta
+    conectado_em: float | None = None  # time.monotonic() do estado conectado: fim da lacuna
 
 
 class Coordenador:
@@ -312,7 +351,7 @@ class Coordenador:
             A disputa pela posse (RF14) é configurada pelo ambiente: JANELA_DISPUTA (padrão de 3 s),
             FATOR_EXTENSAO_JANELA (3), MARGEM_HISTERESE (5 dB), MINIMO_AMOSTRAS (5) e PRAZO_CONEXAO (5 s).
             A conexao-fraca (RF19), por LIMIAR_CONEXAO_FRACA (-78 dBm), LEITURAS_FRACAS (3) e
-            LEITURAS_NORMAIS (3); o handoff (RF06), por PRAZO_LIBERACAO (3 s).
+            LEITURAS_NORMAIS (3); o handoff (RF06), por PRAZO_LIBERACAO (5 s) e CARENCIA_HANDOFF (30 s).
 
             Raises:
                 ValueError: Se o intervalo, as pulseiras, o prazo de sinal de vida ou a configuração
@@ -335,8 +374,11 @@ class Coordenador:
         self.leituras_fracas                            = ler_leituras_fracas()
         self.leituras_normais                           = ler_leituras_normais()
         self.prazo_liberacao                            = ler_prazo_liberacao()
+        self.carencia_handoff                           = ler_carencia_handoff()
 
         self._liberacoes:      dict[str, _Espera]       = {} # Pulseira -> handoff aguardando a origem soltar (RF06)
+        # Pulseira -> (origem que venceu o handoff, time.monotonic() do fim da carência) (RF06)
+        self._carencias:       dict[str, tuple[str, float]] = {}
         self._esperas_conexao: dict[str, _Espera]       = {} # Pulseira -> coletor com a posse aguardando conectar (RF14)
         self._disputas:        dict[str, asyncio.Task]  = {} # Pulseira -> disputa, handoff ou republicação em andamento
         # Pulseira -> conexao-fraca da conexão do dono atual (RF19); recomeça a cada posse publicada
@@ -642,11 +684,12 @@ class Coordenador:
                 f"Handoff não iniciado: {e}"
             )
             return
-        self._disputas[pulseira] = asyncio.create_task(self._conduzir_handoff(pulseira, dono, liberada, id_handoff))
+        handoff = _Handoff(id_handoff, dono)
+        self._disputas[pulseira] = asyncio.create_task(self._conduzir_handoff(pulseira, liberada, handoff))
 
 
-    async def _conduzir_handoff(self, pulseira: str, dono: str, liberada: _Espera, id_handoff: str) -> None:
-        """Espera a origem liberar, publica a posse como liberada e abre a disputa"""
+    async def _conduzir_handoff(self, pulseira: str, liberada: _Espera, handoff: _Handoff) -> None:
+        """Espera a origem liberar, publica a posse como liberada, abre a disputa e registra o resultado (RF06)."""
         try:
             try:
                 await asyncio.wait_for(liberada.fim.wait(), self.prazo_liberacao)
@@ -654,28 +697,64 @@ class Coordenador:
                 # A origem continua conectada: a classificação recomeça e outro handoff exige novas leituras fracas
                 self._classificacoes.pop(pulseira, None)
                 logging.warning(
-                    f"Handoff cancelado | Id: {id_handoff} | Pulseira: {pulseira} | "
-                    f"Origem {dono} não liberou em {self.prazo_liberacao:g} s; continua sendo dono."
+                    f"Handoff cancelado | Id: {handoff.id} | Pulseira: {pulseira} | "
+                    f"Origem {handoff.origem} não liberou em {self.prazo_liberacao:g} s; continua sendo dono."
                 )
                 return
             # Daqui em diante, uma liberação ou queda é a de quem recebeu a posse na disputa
             self._liberacoes.pop(pulseira, None)
+            # A origem publica o desconectado logo antes da liberação (Coletor._liberar), então a chegada
+            # da liberação marca o início da lacuna de dados (RNF04)
+            handoff.liberada_em = liberada.em
             await self._publicar_posse(pulseira, None)
-            logging.info(f"Posse liberada | Handoff: {id_handoff} | Pulseira: {pulseira} | Motivo: origem {dono} soltou a pulseira")
             logging.info(
-                f"Disputa aberta | Handoff: {id_handoff} | Pulseira: {pulseira} | "
-                f"Janela: {self.janela_disputa:g} s | Favorito: {self._ultimo_ativo.get(pulseira)}"
+                f"Posse liberada | Handoff: {handoff.id} | Pulseira: {pulseira} | "
+                f"Motivo: origem {handoff.origem} soltou a pulseira"
+            )
+            logging.info(
+                f"Disputa aberta | Handoff: {handoff.id} | Pulseira: {pulseira} | "
+                f"Janela: {self.janela_disputa:g} s | Favorito: {handoff.origem}"
             )
             # Só contam as leituras que chegaram depois da liberação (RF06)
-            await self._encerrar_disputa(pulseira, liberada.em, id_handoff, origem=dono)
+            await self._encerrar_disputa(pulseira, liberada.em, handoff)
+            self._concluir_handoff(pulseira, handoff)
         except BrokerIndisponivel as e:
             logging.warning(
-                f"Erro: {BrokerIndisponivel.codigo} | Handoff: {id_handoff} | Pulseira: {pulseira} | "
+                f"Erro: {BrokerIndisponivel.codigo} | Handoff: {handoff.id} | Pulseira: {pulseira} | "
                 f"Handoff interrompido: {e}"
             )
         finally:
             self._liberacoes.pop(pulseira, None)
             self._disputas.pop(pulseira, None)
+
+
+    def _concluir_handoff(self, pulseira: str, handoff: _Handoff) -> None:
+        """Registra o resultado do handoff com a lacuna de dados, comparada com a meta do RNF04, e
+        inicia a carência se a origem venceu a disputa (RF06)."""
+        resumo = (
+            f"Handoff concluído | Id: {handoff.id} | Pulseira: {pulseira} | Origem: {handoff.origem} | "
+            f"Vencedor: {handoff.vencedor or 'nenhum'} | Conectado: {handoff.conectado or 'nenhum'} | "
+            f"RSSI suavizado [{_resumir_candidatos(handoff.candidatos) or 'nenhum candidato'}]"
+        )
+        if handoff.conectado_em is None:
+            # A posse ficou liberada: a lacuna continua até uma nova disputa conectar alguém
+            lacuna = time.monotonic() - handoff.liberada_em
+            logging.warning(f"{resumo} | Lacuna: {lacuna:.1f} s até agora, sem coletor conectado")
+            return
+
+        lacuna = handoff.conectado_em - handoff.liberada_em
+        if lacuna > META_LACUNA_HANDOFF:
+            logging.warning(f"{resumo} | Lacuna: {lacuna:.1f} s | Acima da meta de {META_LACUNA_HANDOFF:g} s (RNF04)")
+        else:
+            logging.info(f"{resumo} | Lacuna: {lacuna:.1f} s")
+
+        # Só quando a origem venceu e reconectou: a posse devolvida depois de o vencedor falhar não conta
+        if handoff.vencedor == handoff.origem == handoff.conectado and self.carencia_handoff > 0:
+            self._carencias[pulseira] = (handoff.origem, time.monotonic() + self.carencia_handoff)
+            logging.info(
+                f"Carência de handoff | Pulseira: {pulseira} | Origem: {handoff.origem} | "
+                f"Sem novo handoff por {self.carencia_handoff:g} s"
+            )
 
 
     async def anunciar_online(self) -> None:
@@ -813,7 +892,7 @@ class Coordenador:
             self._a_republicar.discard(pulseira)
             logging.info(f"Posse republicada | Pulseira: {pulseira} | Coletor: {dono} | Motivo: reinício do coordenador")
             if not await self._aguardar_conexao(pulseira, espera):
-                await self._resolver_falha_conexao(pulseira, dono, None, "")
+                await self._resolver_falha_conexao(pulseira, dono)
         except BrokerIndisponivel as e:
             # Fica em _a_republicar: a próxima conexão tenta de novo
             logging.warning(f"Erro: {BrokerIndisponivel.codigo} | Pulseira: {pulseira} | Posse não republicada: {e}")
@@ -883,9 +962,34 @@ class Coordenador:
 
         if coletor != dono or not self._conexao_fraca(pulseira, sinal):
             return # Só a leitura do dono dispara handoff
+        if self._em_carencia(pulseira, dono):
+            return
 
         # Sem comparação prévia: a pulseira conectada não anuncia, então nenhum vizinho tem sinal.
         await self._iniciar_handoff(pulseira, dono)
+
+
+    def _em_carencia(self, pulseira: str, dono: str) -> bool:
+        """Se a origem que acabou de vencer a disputa ainda está na carência de handoff (RF06).
+
+        A carência vale só para o mesmo dono: com outro coletor a conexão é outra.
+        """
+        carencia = self._carencias.get(pulseira)
+        if carencia is None:
+            return False
+        origem, fim = carencia
+        restante = fim - time.monotonic()
+        if origem != dono or restante <= 0:
+            del self._carencias[pulseira]
+            return False
+        # Sem reiniciar, a conexão seguiria em conexao-fraca sem nova transição, e o handoff não
+        # sairia nem depois da carência
+        self._classificacoes.pop(pulseira, None)
+        logging.info(
+            f"Handoff adiado | Pulseira: {pulseira} | Origem: {dono} | Motivo: venceu o último handoff; "
+            f"carência por mais {restante:.1f} s"
+        )
+        return True
 
 
     def _conexao_fraca(self, pulseira: str, sinal: SinalColetor) -> bool:
@@ -929,17 +1033,16 @@ class Coordenador:
         self._disputas[pulseira] = asyncio.create_task(self._encerrar_disputa(pulseira, inicio))
 
 
-    async def _encerrar_disputa(
-        self, pulseira: str, inicio: float, handoff: str | None = None, origem: str | None = None,
-    ) -> None:
+    async def _encerrar_disputa(self, pulseira: str, inicio: float, handoff: _Handoff | None = None) -> None:
         """Ao fim da janela, concede a posse ao vencedor e espera que ele conecte (RF14).
 
         Args:
             inicio (float): time.monotonic() do início da janela; só contam as medianas a partir dele.
-            handoff (str | None): Id do handoff que abriu a disputa, para o log do resultado (RF06).
-            origem (str | None): Origem do handoff, que recebe a posse de volta se o vencedor não conectar (RF06).
+            handoff (_Handoff | None): Handoff que abriu a disputa (RF06). A origem é a favorita e
+                recebe a posse de volta se o vencedor não conectar; os candidatos, o vencedor e quem
+                conectou ficam registrados nele para o log do resultado.
         """
-        ref = f" | Handoff: {handoff}" if handoff else ""
+        ref = f" | Handoff: {handoff.id}" if handoff else ""
         try:
             await asyncio.sleep(self.janela_disputa)
             if self._posse_chegou_na_janela(pulseira, ref):
@@ -956,25 +1059,27 @@ class Coordenador:
                 if self._posse_chegou_na_janela(pulseira, ref):
                     return
 
-            favorito = self._ultimo_ativo.get(pulseira)
+            # No handoff, a favorita é a origem (RF06), mesmo que o último conectado registrado seja outro
+            favorito = handoff.origem if handoff else self._ultimo_ativo.get(pulseira)
             candidatos = self.visao.candidatos(pulseira, inicio)
             vencedor = escolher_coletor(candidatos, favorito=favorito, margem=self.margem)
+            if handoff:
+                handoff.candidatos, handoff.vencedor = candidatos, vencedor
             if vencedor is None:
                 logging.warning(f"Disputa sem vencedor{ref} | Pulseira: {pulseira} | Os candidatos ficaram indisponíveis durante a janela.")
                 return
 
             espera = await self._conceder(pulseira, vencedor)
             motivo = "favorito" if vencedor == favorito else "maior RSSI"
-            rssis = ", ".join(
-                f"{coletor}: {candidato.rssi_suavizado:.1f} dBm ({candidato.amostras} amostras)"
-                for coletor, candidato in candidatos.items()
-            )
             logging.info(
                 f"Posse concedida{ref} | Pulseira: {pulseira} | Coletor: {vencedor} | Motivo: {motivo} | "
-                f"Favorito: {favorito} | RSSI suavizado [{rssis}]"
+                f"Favorito: {favorito} | RSSI suavizado [{_resumir_candidatos(candidatos)}]"
             )
-            if not await self._aguardar_conexao(pulseira, espera):
-                await self._resolver_falha_conexao(pulseira, vencedor, origem, ref)
+            if await self._aguardar_conexao(pulseira, espera):
+                if handoff:
+                    handoff.conectado, handoff.conectado_em = vencedor, espera.em
+            else:
+                await self._resolver_falha_conexao(pulseira, vencedor, handoff)
         except BrokerIndisponivel as e:
             logging.warning(f"Erro: {BrokerIndisponivel.codigo}{ref} | Pulseira: {pulseira} | Posse não publicada: {e}")
         finally:
@@ -1023,9 +1128,12 @@ class Coordenador:
         return espera.sucesso
 
 
-    async def _resolver_falha_conexao(self, pulseira: str, coletor: str, origem: str | None, ref: str) -> None:
+    async def _resolver_falha_conexao(self, pulseira: str, coletor: str, handoff: _Handoff | None = None) -> None:
         """O coletor com a posse não conectou no prazo. No handoff, a posse volta à origem, que tem o
         mesmo prazo (RF06); fora dele, ou se a origem também falhar, a posse é liberada (RF14).
+
+        Args:
+            handoff (_Handoff | None): Handoff em andamento; registra a origem se ela reconectar.
 
         Raises:
             BrokerIndisponivel: Se a posse não puder ser publicada.
@@ -1033,6 +1141,8 @@ class Coordenador:
         if self.visao.posse.get(pulseira) != coletor:
             return # A posse já mudou por outro caminho
 
+        ref = f" | Handoff: {handoff.id}" if handoff else ""
+        origem = handoff.origem if handoff else None
         if origem is not None and origem != coletor and self.visao.disponivel(origem):
             logging.warning(
                 f"Posse devolvida à origem{ref} | Pulseira: {pulseira} | Origem: {origem} | "
@@ -1040,6 +1150,7 @@ class Coordenador:
             )
             espera = await self._conceder(pulseira, origem)
             if await self._aguardar_conexao(pulseira, espera):
+                handoff.conectado, handoff.conectado_em = origem, espera.em
                 return
             if self.visao.posse.get(pulseira) != origem:
                 return
