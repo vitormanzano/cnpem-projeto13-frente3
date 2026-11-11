@@ -57,6 +57,15 @@ class Topicos:
 
 
     @staticmethod
+    def extrair_frequencia_cardiaca(topico: str) -> str | None:
+        """Devolve a pulseira de pulseiras/{pulseira}/frequencia-cardiaca, ou None se o tópico for outro."""
+        partes = topico.split("/")
+        if len(partes) == 3 and partes[0] == "pulseiras" and partes[2] == "frequencia-cardiaca":
+            return partes[1]
+        return None
+
+
+    @staticmethod
     def estado_posse(pulseira: str) -> str:
         """Coordenador: Coletor responsável ou posse liberada"""
         return f"pulseiras/{pulseira}/posse"

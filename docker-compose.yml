@@ -27,6 +27,19 @@ services:
     depends_on:
       - hivemq
 
+  painel:
+    <<: *gateway
+    profiles: [central]
+    environment:
+      PAPEL: painel
+      BROKER_HOST: hivemq
+    ports:
+      - "${PAINEL_PORTA:-8765}:${PAINEL_PORTA:-8765}" # Abra http://<máquina central>:8765 em qualquer computador da rede
+    volumes:
+      - ./src:/app/src
+    depends_on:
+      - hivemq
+
   coletor:
     <<: *gateway
     profiles: [coletor]

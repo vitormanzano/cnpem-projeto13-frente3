@@ -40,6 +40,30 @@ def ler_intervalo_sinal_de_vida(intervalo: float | None = None) -> float:
     return intervalo
 
 
+def ler_limiar_conexao_fraca(limiar: int | None = None) -> int:
+    """Resolve o limiar de RSSI abaixo do qual a leitura do coletor ativo conta como fraca (RF19).
+
+    O painel usa a mesma função, para que a faixa crítica coincida com a conexao-fraca (RF20).
+
+    Args:
+        limiar (int | None): Limiar em dBm. Se omitido, é lido de LIMIAR_CONEXAO_FRACA (padrão de -78 dBm).
+
+    Raises:
+        ValueError: Se não for um inteiro negativo.
+    """
+    if limiar is None:
+        valor = os.getenv("LIMIAR_CONEXAO_FRACA") or str(LIMIAR_CONEXAO_FRACA_PADRAO)
+        try:
+            limiar = int(valor)
+        except ValueError as e:
+            raise ValueError(f"LIMIAR_CONEXAO_FRACA deve ser um inteiro em dBm, recebido {valor!r}.") from e
+
+    # RSSI em dBm é sempre negativo: um limiar >= 0 marcaria toda leitura como fraca
+    if limiar >= 0:
+        raise ValueError(f"LIMIAR_CONEXAO_FRACA deve ser negativo (dBm), recebido {limiar}.")
+    return limiar
+
+
 class Coordenador:
     """Responsável por gerenciar as conexões entre coletores e pulseiras."""
 
@@ -65,7 +89,7 @@ class Coordenador:
 
         self.janela_disputa                             = float(os.getenv("JANELA_DISPUTA", JANELA_DISPUTA_PADRAO))
         self.janela_handoff                             = float(os.getenv("JANELA_HANDOFF", JANELA_HANDOFF_PADRAO))
-        self.limiar                                     = int(os.getenv("LIMIAR_CONEXAO_FRACA", LIMIAR_CONEXAO_FRACA_PADRAO))
+        self.limiar                                     = ler_limiar_conexao_fraca()
         self.minimo_fracas                              = int(os.getenv("LEITURAS_FRACAS", LEITURAS_FRACAS_PADRAO))
         self.prazo_liberacao                            = float(os.getenv("PRAZO_LIBERACAO", PRAZO_LIBERACAO_PADRAO))
         self.margem                                     = float(os.getenv("MARGEM_HISTERESE", MARGEM_HISTERESE_PADRAO))

@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Painel das pulseiras</title>
+<!-- Sem nada carregado de fora (CSS, JS e fontes embutidos): o painel funciona sem internet (RF20, RNF03) -->
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f9f9f7; --surface: #fcfcfb;
+    --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,.10);
+    --series: #2a78d6;
+    --good: #0ca30c; --warn: #c98a00; --crit: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0d0d0d; --surface: #1a1a19;
+      --ink: #f0efec; --ink2: #c3c2b7;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10);
+      --series: #3987e5; --warn: #fab219;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1000px; margin: 0 auto; padding: 20px 16px 32px; }
+
+  .topo { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0; }
+  .meta { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink2); }
+  .badge { font-size: 11px; font-weight: 600; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--axis); color: var(--ink2); }
+  .pill { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; padding: 4px 12px 4px 10px; border-radius: 999px; background: var(--surface); border: 1px solid var(--border); }
+  .pill i, .estado i { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); display: inline-block; }
+  #aviso { margin: 10px 0 0; min-height: 20px; font-size: 13px; color: var(--crit); }
+
+  .controles { display: flex; align-items: center; gap: 10px; margin: 14px 0 4px; font-size: 13px; color: var(--ink2); }
+  .seg { display: inline-flex; border: 1px solid var(--axis); border-radius: 8px; overflow: hidden; }
+  .seg button { font: inherit; font-size: 13px; padding: 4px 12px; border: 0; background: transparent; color: var(--ink2); cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--axis); }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); font-weight: 600; }
+
+  .pulseira { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--grid); }
+  .cab-pulseira h2 { font-size: 16px; font-weight: 600; margin: 0; font-variant-numeric: tabular-nums; }
+  .cab-pulseira p { margin: 2px 0 0; font-size: 13px; color: var(--ink2); display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; }
+  .estado { display: inline-flex; align-items: center; gap: 6px; }
+
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 12px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+  .label { font-size: 13px; color: var(--ink2); margin: 0 0 4px; display: flex; align-items: center; gap: 8px; }
+  .hero { font-size: 64px; line-height: 1.05; font-weight: 600; letter-spacing: -.02em; display: flex; align-items: baseline; gap: 8px; font-variant-numeric: tabular-nums; }
+  .hero .vazio { color: var(--muted); font-weight: 300; }
+  .hero small { font-size: 18px; font-weight: 500; color: var(--ink2); letter-spacing: 0; }
+  .sub { margin: 6px 0 0; font-size: 13px; color: var(--ink2); min-height: 20px; }
+  .stats { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--grid); font-size: 13px; color: var(--ink2); }
+  .stats b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .nota { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+  .zerar { margin-left: auto; font: inherit; font-size: 12px; padding: 2px 10px; border-radius: 6px; border: 1px solid var(--axis); background: transparent; color: var(--ink2); cursor: pointer; }
+
+  .sig { display: flex; align-items: flex-end; gap: 3px; height: 24px; margin-left: auto; }
+  .sig span { width: 7px; border-radius: 2px; background: var(--grid); }
+  .sig span:nth-child(1) { height: 25%; } .sig span:nth-child(2) { height: 50%; }
+  .sig span:nth-child(3) { height: 75%; } .sig span:nth-child(4) { height: 100%; }
+  .qual { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; font-size: 14px; }
+  .qual i { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-style: normal; font-size: 11px; font-weight: 700; }
+
+  .chart { margin-top: 14px; }
+  .chart h3 { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
+  .plot { position: relative; }
+  canvas { display: block; width: 100%; height: 180px; touch-action: pan-y; }
+  .tip { position: absolute; top: 0; pointer-events: none; transform: translate(-50%, -100%); margin-top: -4px; background: var(--ink); color: var(--surface); font-size: 12px; padding: 4px 8px; border-radius: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; display: none; }
+
+  details { margin-top: 10px; font-size: 13px; color: var(--ink2); }
+  summary { cursor: pointer; padding: 4px 0; }
+  .rolagem { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  th:nth-child(-n+2), td:nth-child(-n+2), th:last-child, td:last-child { text-align: left; }
+  th { color: var(--ink2); font-weight: 600; }
+  td { color: var(--ink); }
+  footer { margin-top: 22px; font-size: 12px; color: var(--muted); }
+
+  @media (max-width: 700px) { .tiles { grid-template-columns: 1fr; } .hero { font-size: 54px; } }
+</style>
+</head>
+<body>
+<main>
+  <header class="topo">
+    <h1>Painel das pulseiras</h1>
+    <div class="meta">
+      <span class="badge" id="simulado" hidden>SIMULADO</span>
+      <span class="pill" id="conexao"><i></i><span>Conectando…</span></span>
+    </div>
+  </header>
+  <p id="aviso" role="status"></p>
+
+  <div class="controles">
+    Janela dos gráficos
+    <div class="seg" role="group" aria-label="Janela de tempo">
+      <button type="button" data-janela="60" aria-pressed="false">1 min</button>
+      <button type="button" data-janela="300" aria-pressed="true">5 min</button>
+      <button type="button" data-janela="900" aria-pressed="false">15 min</button>
+    </div>
+  </div>
+
+  <div id="pulseiras"></div>
+
+  <footer>Protótipo de pesquisa: não é dispositivo médico e não substitui procedimentos de segurança.</footer>
+</main>
+
+<template id="modelo-pulseira">
+  <section class="pulseira">
+    <header class="cab-pulseira">
+      <h2>Pulseira <span data-c="endereco"></span></h2>
+      <p><span data-c="posse"></span><span class="estado" data-c="estado"></span></p>
+    </header>
+
+    <div class="tiles">
+      <article class="card">
+        <p class="label">Frequência cardíaca</p>
+        <div class="hero"><span data-c="bpm" class="vazio">–</span><small>bpm</small></div>
+        <p class="sub" data-c="bpm-sub"></p>
+        <div class="stats">
+          <span>Mín <b data-c="minimo">—</b></span>
+          <span>Média <b data-c="media">—</b></span>
+          <span>Máx <b data-c="maximo">—</b></span>
+          <button type="button" class="zerar" data-c="zerar">Zerar</button>
+        </div>
+        <p class="nota" data-c="desde"></p>
+      </article>
+
+      <article class="card">
+        <p class="label">Força do sinal (RSSI)
+          <span class="sig" data-c="barras" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+        </p>
+        <div class="hero"><span data-c="rssi" class="vazio">–</span><small>dBm</small></div>
+        <p class="sub"><span class="qual" data-c="qualidade"></span></p>
+        <div class="stats"><span data-c="bruto"></span></div>
+        <p class="nota" data-c="rssi-nota"></p>
+      </article>
+    </div>
+
+    <section class="card chart">
+      <h3>Frequência cardíaca (bpm)</h3>
+      <div class="plot"><canvas data-c="grafico-fc" role="img"></canvas><div class="tip" data-c="dica-fc"></div></div>
+    </section>
+    <section class="card chart">
+      <h3>Força do sinal: mediana (dBm)</h3>
+      <div class="plot"><canvas data-c="grafico-rssi" role="img"></canvas><div class="tip" data-c="dica-rssi"></div></div>
+    </section>
+
+    <details data-c="tabela">
+      <summary>Últimas leituras</summary>
+      <div class="rolagem">
+        <table>
+          <thead><tr><th>Horário</th><th>Coletor</th><th>FC (bpm)</th><th>RSSI bruto</th><th>Mediana</th><th>Estado</th></tr></thead>
+          <tbody data-c="linhas"></tbody>
+        </table>
+      </div>
+    </details>
+  </section>
+</template>
+
+<script>
+"use strict";
+const $ = (seletor, raiz = document) => raiz.querySelector(seletor);
+const parte = (raiz, nome) => raiz.querySelector(`[data-c="${nome}"]`);
+const LINHAS_TABELA = 30;
+
+const ROTULO_ESTADO = { conectado: "Conectado", desconectado: "Desconectado", "nao-encontrado": "Não encontrado", "conexao-fraca": "Conexão fraca" };
+const COR_ESTADO = { conectado: "var(--good)", desconectado: "var(--crit)", "nao-encontrado": "var(--warn)", "conexao-fraca": "var(--warn)" };
+const QUALIDADE = {
+  otimo:   { rotulo: "Ótimo",   barras: 4, cor: "var(--good)", glifo: "✓", fg: "#fff",    dica: "Pulseira bem posicionada" },
+  bom:     { rotulo: "Bom",     barras: 3, cor: "var(--good)", glifo: "✓", fg: "#fff",    dica: "Sinal estável" },
+  fraco:   { rotulo: "Fraco",   barras: 2, cor: "var(--warn)", glifo: "!", fg: "#0b0b0b", dica: "Perto do limiar de conexão fraca" },
+  critico: { rotulo: "Crítico", barras: 1, cor: "var(--crit)", glifo: "✕", fg: "#fff",    dica: "Abaixo do limiar: o coordenador troca de coletor" },
+};
+const SEM_QUALIDADE = { rotulo: "Sem leitura", barras: 0, cor: "var(--muted)", glifo: "–", fg: "#fff", dica: "" };
+
+let config = null;          // Vem do servidor no evento "inicio"
+let janela = 300;           // s exibidos nos gráficos
+let retrato = null;         // Última atualização recebida
+let recebidoEm = 0;         // performance.now() da última atualização
+const pulseiras = new Map(); // endereço -> { raiz, registros, graficos }
+
+const hora = (t) => new Date(t * 1000).toLocaleTimeString("pt-BR");
+const cssv = (nome) => getComputedStyle(document.documentElement).getPropertyValue(nome).trim();
+const esc = (texto) => String(texto).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const arred = (v) => (v == null ? "—" : Math.round(v));
+
+// Relógio do servidor, avançando sozinho entre as atualizações (e enquanto o servidor estiver fora)
+function agoraServidor() {
+  return retrato ? retrato.t + (performance.now() - recebidoEm) / 1000 : Date.now() / 1000;
+}
+
+// Sem atualização do servidor há mais que o prazo, nada do que está na tela é atual (RF20)
+function servidorAtrasado() {
+  return !retrato || performance.now() - recebidoEm > config.tempo_sem_leitura * 1000;
+}
+
+// ---- montagem --------------------------------------------------------------
+function montar() {
+  const lista = $("#pulseiras");
+  lista.replaceChildren();
+  pulseiras.clear();
+  for (const endereco of config.pulseiras) {
+    const raiz = $("#modelo-pulseira").content.firstElementChild.cloneNode(true);
+    parte(raiz, "endereco").textContent = endereco;
+    const p = {
+      raiz,
+      registros: [],
+      graficos: {
+        fc: criarGrafico(parte(raiz, "grafico-fc"), parte(raiz, "dica-fc"), "fc"),
+        rssi: criarGrafico(parte(raiz, "grafico-rssi"), parte(raiz, "dica-rssi"), "rssi"),
+      },
+    };
+    p.graficos.fc.pulseira = p;
+    p.graficos.rssi.pulseira = p;
+    parte(raiz, "zerar").addEventListener("click", () => zerar(endereco));
+    parte(raiz, "tabela").addEventListener("toggle", () => desenharTabela(p));
+    parte(raiz, "rssi-nota").textContent =
+      `Mediana das últimas ${config.janela_mediana} leituras do coletor com a posse. ` +
+      `Ótimo ≥ ${config.limite_otimo} · Bom ≥ ${config.limite_bom} · Fraco ≥ ${config.limiar} · ` +
+      `Crítico < ${config.limiar} dBm (limiar de conexão fraca do coordenador).`;
+    pulseiras.set(endereco, p);
+    lista.append(raiz);
+  }
+  $("#simulado").hidden = !config.simulado;
+}
+
+async function zerar(endereco) {
+  try {
+    const resposta = await fetch(`/api/zerar?pulseira=${encodeURIComponent(endereco)}`, { method: "POST" });
+    if (!resposta.ok) throw new Error(resposta.status);
+  } catch (_) {
+    $("#aviso").textContent = "Não foi possível zerar as estatísticas: sem conexão com o servidor do painel.";
+  }
+}
+
+// ---- eventos do servidor -----------------------------------------------------
+function aoIniciar(dados) {
+  config = dados.config;
+  montar();
+  for (const [endereco, p] of pulseiras) p.registros = dados.historico[endereco] || [];
+  aoAtualizar(dados.retrato);
+}
+
+function aoAtualizar(novoRetrato, novos = {}) {
+  retrato = novoRetrato;
+  recebidoEm = performance.now();
+  const limite = retrato.t - config.janela_historico;
+  for (const [endereco, p] of pulseiras) {
+    if (novos[endereco]) p.registros.push(...novos[endereco]);
+    let inicio = 0;
+    while (inicio < p.registros.length && p.registros[inicio].t < limite) inicio++;
+    if (inicio) p.registros.splice(0, inicio);
+  }
+  desenhar();
+}
+
+function conectar() {
+  const fonte = new EventSource("/eventos");
+  // A cada (re)conexão chega um "inicio" com o histórico completo, que substitui o anterior
+  fonte.addEventListener("inicio", (e) => aoIniciar(JSON.parse(e.data)));
+  fonte.onmessage = (e) => { const d = JSON.parse(e.data); aoAtualizar(d.retrato, d.novos); };
+  fonte.onerror = () => desenhar(); // O EventSource reconecta sozinho
+}
+
+// ---- painel ------------------------------------------------------------------
+function desenhar() {
+  if (!config) return;
+  const atrasado = servidorAtrasado();
+  const pill = $("#conexao");
+  let texto, cor, aviso = "";
+  if (atrasado) {
+    texto = "Servidor offline"; cor = "var(--crit)";
+    aviso = "Sem atualizações do servidor do painel. Tentando reconectar…";
+  } else if (!retrato.broker) {
+    texto = "Broker indisponível"; cor = "var(--crit)";
+    aviso = "Sem conexão com o broker: as leituras param até ele voltar. O painel reconecta sozinho.";
+  } else {
+    texto = "Ao vivo"; cor = "var(--good)";
+  }
+  pill.lastElementChild.textContent = texto;
+  pill.firstElementChild.style.background = cor;
+  $("#aviso").textContent = aviso;
+
+  for (const [endereco, p] of pulseiras) {
+    const r = retrato && retrato.pulseiras[endereco];
+    if (r) desenharPulseira(p, atrasado ? semValoresAtuais(r) : r);
+  }
+}
+
+function semValoresAtuais(r) {
+  return { ...r, bpm: null, rssi: null, rssi_mediana: null, qualidade: null };
+}
+
+function desenharPulseira(p, r) {
+  const raiz = p.raiz;
+
+  // Posse e estado da conexão publicados (RF14, RF08)
+  let posse;
+  if (!r.posse_conhecida) posse = "Posse ainda não recebida do coordenador";
+  else if (r.dono == null) posse = "Posse liberada: nenhum coletor responsável";
+  else posse = `Coletor com a posse: ${r.dono}`;
+  parte(raiz, "posse").textContent = posse;
+  const estado = parte(raiz, "estado");
+  estado.replaceChildren();
+  if (r.dono != null) {
+    const ponto = document.createElement("i");
+    ponto.style.background = r.estado ? COR_ESTADO[r.estado] || "var(--muted)" : "var(--muted)";
+    const rotulo = r.estado
+      ? `${ROTULO_ESTADO[r.estado] || r.estado} (há ${Math.round(r.estado_idade)} s)`
+      : "Aguardando o estado do coletor";
+    estado.append(ponto, rotulo);
+  }
+
+  // Frequência cardíaca
+  const bpm = parte(raiz, "bpm");
+  bpm.textContent = r.bpm != null ? r.bpm : "–";
+  bpm.classList.toggle("vazio", r.bpm == null);
+  parte(raiz, "bpm-sub").textContent = r.bpm != null
+    ? (r.bpm_idade < 2 ? "ao vivo" : `há ${Math.round(r.bpm_idade)} s`)
+    : "sem leitura" + (r.bpm_idade != null ? ` (última há ${Math.round(r.bpm_idade)} s)` : "");
+  const est = r.estatisticas;
+  parte(raiz, "minimo").textContent = est.minimo ?? "—";
+  parte(raiz, "media").textContent = arred(est.media);
+  parte(raiz, "maximo").textContent = est.maximo ?? "—";
+  parte(raiz, "desde").textContent = `${est.quantidade} leitura(s) desde ${hora(est.desde)}`;
+
+  // Força do sinal: mediana em destaque, bruto visível (RF20)
+  const q = QUALIDADE[r.qualidade] || SEM_QUALIDADE;
+  const rssi = parte(raiz, "rssi");
+  rssi.textContent = r.rssi_mediana != null ? Math.round(r.rssi_mediana) : "–";
+  rssi.classList.toggle("vazio", r.rssi_mediana == null);
+  const qual = parte(raiz, "qualidade");
+  const icone = document.createElement("i");
+  icone.textContent = q.glifo; icone.style.background = q.cor; icone.style.color = q.fg;
+  qual.replaceChildren(icone, q.dica ? `${q.rotulo} · ${q.dica}` : q.rotulo);
+  [...parte(raiz, "barras").children].forEach((barra, i) => { barra.style.background = i < q.barras ? q.cor : ""; });
+  parte(raiz, "bruto").textContent = r.rssi != null
+    ? `Bruto: ${r.rssi} dBm`
+    : (r.dono == null ? "Sem coletor com a posse" : "Sem leitura de RSSI");
+
+  desenharGrafico(p.graficos.fc);
+  desenharGrafico(p.graficos.rssi);
+  p.graficos.fc.canvas.setAttribute("aria-label", `Frequência cardíaca: ${r.bpm != null ? r.bpm + " bpm" : "sem leitura"}`);
+  p.graficos.rssi.canvas.setAttribute("aria-label", `Força do sinal: ${q.rotulo}${r.rssi_mediana != null ? ", " + Math.round(r.rssi_mediana) + " dBm" : ""}`);
+  if (parte(raiz, "tabela").open) desenharTabela(p);
+}
+
+function desenharTabela(p) {
+  if (!parte(p.raiz, "tabela").open) return;
+  const linhas = p.registros.slice(-LINHAS_TABELA).reverse().map((r) => `<tr>
+    <td>${hora(r.t)}</td><td>${esc(r.coletor)}</td>
+    <td>${r.bpm ?? ""}</td><td>${r.estado ? (r.rssi ?? "—") : ""}</td><td>${r.estado ? arred(r.mediana) : ""}</td>
+    <td>${r.estado ? esc(ROTULO_ESTADO[r.estado] || r.estado) : ""}</td></tr>`);
+  parte(p.raiz, "linhas").innerHTML = linhas.join("");
+}
+
+// ---- gráficos ----------------------------------------------------------------
+function criarGrafico(canvas, dica, tipo) {
+  const g = { canvas, dica, tipo, hover: null, geo: null, pulseira: null };
+  canvas.addEventListener("pointermove", (e) => mostrarDica(g, e));
+  canvas.addEventListener("pointerleave", () => esconderDica(g));
+  return g;
+}
+
+function pontos(g) {
+  if (g.tipo === "fc") {
+    return g.pulseira.registros.filter((r) => r.bpm != null).map((r) => ({ t: r.t, v: r.bpm, r }));
+  }
+  // Desconectado entra como lacuna: a linha do RSSI é interrompida
+  return g.pulseira.registros.filter((r) => r.estado != null).map((r) => ({ t: r.t, v: r.mediana, r }));
+}
+
+function faixaEixo(g, pts) {
+  if (g.tipo === "rssi") return { min: -100, max: -40, passo: 10 };
+  const vals = pts.map((p) => p.v).filter((v) => v != null);
+  if (!vals.length) return { min: 50, max: 100, passo: 10 };
+  let lo = Math.min(...vals) - 5, hi = Math.max(...vals) + 5;
+  if (hi - lo < 20) { const meio = (hi + lo) / 2; lo = meio - 10; hi = meio + 10; }
+  lo = Math.max(0, lo);
+  const min = Math.floor(lo / 5) * 5;
+  const passo = Math.max(5, Math.ceil((hi - min) / 4 / 5) * 5);
+  return { min, max: min + passo * 4, passo };
+}
+
+function preparar(canvas) {
+  const caixa = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(10, Math.round(caixa.width)), h = Math.round(caixa.height);
+  if (canvas.width !== w * dpr || canvas.height !== h * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w, h };
+}
+
+function desenharGrafico(g) {
+  const { ctx, w, h } = preparar(g.canvas);
+  ctx.clearRect(0, 0, w, h);
+  if (!config) return;
+
+  const m = { e: 44, d: g.tipo === "rssi" ? 62 : 10, t: 10, b: 24 };
+  const x0 = m.e, x1 = w - m.d, y0 = m.t, y1 = h - m.b;
+  const tFim = agoraServidor(), tInicio = tFim - janela;
+  const pts = pontos(g).filter((p) => p.t >= tInicio - config.tempo_sem_leitura);
+  const { min, max, passo } = faixaEixo(g, pts);
+  const X = (t) => x0 + ((t - tInicio) / janela) * (x1 - x0);
+  const Y = (v) => y1 - ((Math.min(max, Math.max(min, v)) - min) / (max - min)) * (y1 - y0);
+
+  const muted = cssv("--muted"), grade = cssv("--grid"), eixo = cssv("--axis"), serie = cssv("--series"), fundo = cssv("--surface");
+  ctx.font = "12px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  ctx.fillStyle = muted; ctx.textBaseline = "middle"; ctx.textAlign = "right";
+  for (let v = min; v <= max + 1e-6; v += passo) {
+    const y = Y(v);
+    ctx.strokeStyle = v === min ? eixo : grade; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x0, y + .5); ctx.lineTo(x1, y + .5); ctx.stroke();
+    ctx.fillText(String(v), x0 - 8, y);
+  }
+
+  if (g.tipo === "rssi") {
+    // Limiar de conexão fraca (RF19): abaixo dele, crítico
+    ctx.strokeStyle = cssv("--crit"); ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(x0, Y(config.limiar) + .5); ctx.lineTo(x1, Y(config.limiar) + .5); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.textAlign = "left";
+    const zonas = [
+      ["Ótimo", (max + config.limite_otimo) / 2],
+      ["Bom", (config.limite_otimo + config.limite_bom) / 2],
+      ["Fraco", (config.limite_bom + config.limiar) / 2],
+      [`Crítico`, (config.limiar + min) / 2],
+    ];
+    for (const [nome, v] of zonas) ctx.fillText(nome, x1 + 8, Y(v));
+    ctx.fillText(`${config.limiar}`, x1 + 8, Y(config.limiar));
+  }
+
+  ctx.textBaseline = "alphabetic"; ctx.textAlign = "left";
+  ctx.fillText(janela >= 60 ? `há ${janela / 60} min` : `há ${janela} s`, x0, h - 6);
+  ctx.textAlign = "right"; ctx.fillText("agora", x1, h - 6);
+
+  // Linha interrompida nas lacunas maiores que o prazo de "sem leitura"
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x0, y0 - 4, x1 - x0, y1 - y0 + 8); ctx.clip();
+  ctx.beginPath();
+  let caneta = false, anterior = null;
+  for (const p of pts) {
+    if (p.v == null) { caneta = false; anterior = null; continue; }
+    if (anterior && p.t - anterior.t > config.tempo_sem_leitura) caneta = false;
+    const x = X(p.t), y = Y(p.v);
+    if (!caneta) { ctx.moveTo(x, y); caneta = true; } else ctx.lineTo(x, y);
+    anterior = p;
+  }
+  ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.lineCap = "round"; ctx.strokeStyle = serie; ctx.stroke();
+  ctx.restore();
+
+  const ponto = (p) => {
+    ctx.beginPath(); ctx.arc(X(p.t), Y(p.v), 6, 0, Math.PI * 2); ctx.fillStyle = fundo; ctx.fill();
+    ctx.beginPath(); ctx.arc(X(p.t), Y(p.v), 4, 0, Math.PI * 2); ctx.fillStyle = serie; ctx.fill();
+  };
+  const ultimo = pts[pts.length - 1];
+  if (ultimo && ultimo.v != null && ultimo.t >= tInicio) ponto(ultimo);
+  if (g.hover) {
+    ctx.strokeStyle = eixo; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(X(g.hover.t) + .5, y0); ctx.lineTo(X(g.hover.t) + .5, y1); ctx.stroke();
+    ponto(g.hover);
+  }
+  g.geo = { X, x0, x1, tInicio, pts };
+}
+
+function mostrarDica(g, e) {
+  if (!g.geo) return;
+  const caixa = g.canvas.getBoundingClientRect();
+  const px = e.clientX - caixa.left;
+  const { x0, x1, tInicio, pts, X } = g.geo;
+  if (px < x0 || px > x1) return esconderDica(g);
+  const t = tInicio + ((px - x0) / (x1 - x0)) * janela;
+  let melhor = null;
+  for (const p of pts) if (p.v != null && (!melhor || Math.abs(p.t - t) < Math.abs(melhor.t - t))) melhor = p;
+  if (!melhor || Math.abs(melhor.t - t) > config.tempo_sem_leitura) return esconderDica(g);
+  g.hover = melhor;
+  desenharGrafico(g);
+  g.dica.textContent = g.tipo === "fc"
+    ? `${hora(melhor.t)} · ${melhor.v} bpm · ${melhor.r.coletor}`
+    : `${hora(melhor.t)} · mediana ${Math.round(melhor.v)} dBm · bruto ${melhor.r.rssi} dBm · ${melhor.r.coletor}`;
+  g.dica.style.display = "block";
+  const metade = g.dica.offsetWidth / 2;
+  g.dica.style.left = Math.min(caixa.width - metade, Math.max(metade, X(melhor.t))) + "px";
+}
+
+function esconderDica(g) {
+  g.hover = null;
+  g.dica.style.display = "none";
+  desenharGrafico(g);
+}
+
+// ---- controles ---------------------------------------------------------------
+document.querySelectorAll(".seg button").forEach((botao) => botao.addEventListener("click", () => {
+  janela = Number(botao.dataset.janela);
+  document.querySelectorAll(".seg button").forEach((b) => b.setAttribute("aria-pressed", String(b === botao)));
+  desenhar();
+}));
+new ResizeObserver(() => desenhar()).observe(document.body);
+// Também sem eventos do servidor: o relógio dos gráficos anda e os valores viram "sem leitura" após o prazo
+setInterval(() => { if (config && servidorAtrasado()) desenhar(); }, 1000);
+
+conectar();
+</script>
+</body>
+</html>

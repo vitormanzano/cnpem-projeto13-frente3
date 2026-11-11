@@ -11,6 +11,9 @@ from coletor.coletor import Coletor, identificador_coletor
 from coordenador.coordenador import Coordenador
 from bluetooth.scanner import ler_endereco_pulseira
 from mqtt.conexao import ConexaoBroker
+from painel.painel import Painel, identificador_painel, ler_modo_simulado, ler_pulseiras_painel
+from painel.servidor import ServidorPainel
+from painel.simulador import PULSEIRA_SIMULADA, SimuladorPulseira
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -43,9 +46,35 @@ async def rodar_coordenador() -> None:
     await coordenador.executar()
 
 
+async def rodar_painel() -> None:
+    """Painel (RF20): consome o broker e serve a página. Com PAINEL_SIMULADO, sobe também o simulador."""
+    try:
+        pulseiras = ler_pulseiras_painel()
+        simulado = ler_modo_simulado()
+        if simulado and PULSEIRA_SIMULADA not in pulseiras:
+            pulseiras.append(PULSEIRA_SIMULADA)
+        cliente_id = identificador_painel()
+        painel = Painel(ConexaoBroker(cliente_id=cliente_id), pulseiras, simulado=simulado)
+        servidor = ServidorPainel(painel)
+        servicos = [servidor.executar]
+        if simulado:
+            simulador = SimuladorPulseira(
+                coordenador=ConexaoBroker(cliente_id=f"{cliente_id}-coordenador-simulado"),
+                coletores=[ConexaoBroker(cliente_id=f"{cliente_id}-coletor-simulado-{letra}") for letra in "ab"],
+            )
+            servicos.append(simulador.executar)
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
+
+    logging.info(f"Iniciando como painel | id {cliente_id}" + (" | modo simulado" if simulado else ""))
+    await painel.assinar_topicos()
+    await painel.executar(*servicos)
+
+
 PAPEIS: dict[str, Callable[[], Awaitable[None]]] = {
     "coletor": rodar_coletor,
     "coordenador": rodar_coordenador,
+    "painel": rodar_painel,
 }
 
 
@@ -64,5 +93,5 @@ async def principal(papel: str) -> None:
 if __name__ == "__main__":
     papel = os.getenv("PAPEL", "").strip().lower()
     if papel not in PAPEIS:
-        raise SystemExit(f"PAPEL inválido: {papel!r}. (coletor ou coordenador)")
+        raise SystemExit(f"PAPEL inválido: {papel!r}. (coletor, coordenador ou painel)")
     asyncio.run(principal(papel))
