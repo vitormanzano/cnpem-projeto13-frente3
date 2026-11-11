@@ -18,31 +18,32 @@ from bluetooth.domain.frequencia_cardiaca import interpretar_medicao
 from bluetooth.domain.classificacao_conexao import ClassificacaoConexao
 
 
-PADRAO_RSSI = re.compile(r"RSSI (-?\d+)")
+PADRAO_RSSI                             = re.compile(r"RSSI (-?\d+)")
 # HCI_RSSI_INVALID: o controlador não tem o valor. Publicado, seria o "melhor sinal" da disputa
-RSSI_INVALIDO_HCI = 127
+RSSI_INVALIDO_HCI                       = 127
 # Status 0x14 do mgmt do kernel: o processo não tem CAP_NET_ADMIN
-TRECHO_SEM_PERMISSAO_BTMGMT = "Permission Denied"
+TRECHO_SEM_PERMISSAO_BTMGMT             = "Permission Denied"
 
-INTERVALO_RSSI_PADRAO = 1.0
-FALHAS_MAXIMAS_RSSI_PADRAO = 3
-TIMEOUT_BTMGMT = 2.0
+INTERVALO_RSSI_PADRAO                   = 1.0
+FALHAS_MAXIMAS_RSSI_PADRAO              = 3
+TIMEOUT_BTMGMT                          = 2.0
 
-TEMPO_SEM_LEITURA_FC_PADRAO = 5.0
+TEMPO_SEM_LEITURA_FC_PADRAO             = 5.0
 
-CONNECT_TIMEOUT_PADRAO = 20.0
+CONNECT_TIMEOUT_PADRAO                  = 20.0
 # O bleak 1.1.1 reporta adaptador ausente ou desligado como BleakError genérico
-TRECHOS_ADAPTADOR_INDISPONIVEL = ("Bluetooth adapters found", "org.bluez.Error.NotReady")
+TRECHOS_ADAPTADOR_INDISPONIVEL          = ("Bluetooth adapters found", "org.bluez.Error.NotReady")
 
 CARACTERISTICA_FREQUENCIA_CARDIACA_UUID = "00002a37-0000-1000-8000-00805f9b34fb" # Heart Rate Measurement (0x2A37)
 # Serviços proprietários da Polar sairiam como "Unknown"
-DESCRICOES_SERVICOS_POLAR = {
+DESCRICOES_SERVICOS_POLAR               = {
     "fb005c80-02e7-f387-1cad-8acd2d8df0c8": "Polar Measurement Data (PMD)",
 }
 
-TAMANHO_MAXIMO_DE_LEITURAS_BUFFER = 10
+TAMANHO_MAXIMO_DE_LEITURAS_BUFFER       = 10
 
-TratadorLeitura = Callable[[LeituraRSSI], None]
+TratadorLeitura            = Callable[[LeituraRSSI], None]
+TratadorFrequenciaCardiaca = Callable[[LeituraFrequenciaCardiaca], None]
 
 
 def ler_timeout_conexao(timeout: float | None = None) -> float:
@@ -178,6 +179,7 @@ class ConexaoPulseira:
         self.intervalo_rssi = ler_intervalo_rssi(intervalo_rssi)
         self.falhas_maximas_rssi = ler_falhas_maximas_rssi(falhas_maximas_rssi)
         self.ao_ler: TratadorLeitura | None = None
+        self.ao_ler_frequencia_cardiaca: TratadorFrequenciaCardiaca | None = None 
         self._classificacao = classificacao if classificacao is not None else ClassificacaoConexao()
         self._client: BleakClient | None = None
         self._desconectado = asyncio.Event()
@@ -432,6 +434,14 @@ class ConexaoPulseira:
 
         self._leituras_frequencia_cardiaca.append(leitura)
         self._leitura_fc_recebida.set()
+        if self.ao_ler_frequencia_cardiaca is not None:
+            try:
+                self.ao_ler_frequencia_cardiaca(leitura)
+            except Exception as e:
+                # Callback do bleak: Uma falha de quem publica não pode interromper as notificações.
+                logging.exception(
+                        f"Erro ao notificar frequência cardíaca da pulseira {self.endereco} [{type(e).__name__}]: {e}"
+                )
         logging.debug(
             f"Pulseira: {self.endereco} | FC {leitura.bpm} | RR {list(leitura.intervalos_rr_ms)} ms"
         )

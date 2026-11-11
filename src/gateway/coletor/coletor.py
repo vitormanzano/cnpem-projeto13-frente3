@@ -10,6 +10,7 @@ from bluetooth.domain.models import EstadoConexao
 from bluetooth.reconexao import ler_configuracao_reconexao, manter_conexao
 from bluetooth.scanner import VarreduraPulseira
 from mqtt.estado_rssi import EstadoRssiColetor
+from mqtt.frequencia_cardiaca import FrequenciaCardiacaColetor
 from mqtt.domain.models import Mensagem, TipoMensagem
 from mqtt.domain.topicos import Topicos
 from mqtt.presenca import PresencaColetor
@@ -68,17 +69,20 @@ class Coletor:
                 PRAZO_SEM_BROKER (padrão de 15 s).
 
         Raises:
-            ValueError: Se a configuração da conexão, da reconexão ou do prazo sem broker for inválida
+            ValueError: Se a configuração da conexão, da reconexão, do prazo sem broker ou do buffer
+                de frequênci cardíaca for inválida
         """
         self.broker                                           = broker
         self.endereco                                         = endereco_pulseira
         self.presenca                                         = PresencaColetor(broker)    # antes de conectar: registra a última vontade
         self.estado_rssi                                      = EstadoRssiColetor(broker)  # O online sai antes do RSSI
+        self.frequencia                                       = FrequenciaCardiacaColetor(broker, endereco_pulseira)
         self._classificacao                                   = ClassificacaoConexao()     # Um estado só, da varredura à conexão (RF08)
         self.varredura                                        = VarreduraPulseira(endereco_pulseira, classificacao=self._classificacao)
         self.varredura.ao_ler                                 = self.estado_rssi.registrar # Cada leitura entra na fila de publicação
         self.conexao                                          = ConexaoPulseira(endereco_pulseira, classificacao=self._classificacao)
         self.conexao.ao_atualizar                             = self.estado_rssi.registrar # Estado e RSSI da conexão, inclusive o desconectado (RF10)
+        self.conexao.ao_ler_frequencia_cardiaca               = self.frequencia.registrar  # Publicada só com a posse (RF17)
         self._varredura: asyncio.Task | None                  = None
         self._sessao: asyncio.Task | None                     = None                       # Conexão enquanto tiver a psse
         self.broker.ao_receber                                = self.ao_receber
@@ -123,12 +127,15 @@ class Coletor:
         quem concede e libera a posse.
         """
         if dono == self.broker.cliente_id:
+            self.frequencia.receber_posse() # Também a posse retida de cada reconexão: libera o buffer (RF17)
             if self._sessao is None or self._sessao.done():
                 logging.info(f"Posse recebida | Pulseira: {self.endereco}")
                 await self._parar_varredura()
                 self._sessao = asyncio.create_task(self._manter_sessao())
             await self.presenca.atualizar_pulseira(self.endereco)
             return
+        # Antes de desconectar: leituras que ainda cheguem sairiam duplicadas com as do novo dono (RF17)
+        self.frequencia.perder_posse()
         if self._sessao is not None:
             logging.warning(f"Posse perdida sem handoff | Pulseira: {self.endereco} | Dono: {dono}")
             await self._desconectar()
@@ -147,6 +154,8 @@ class Coletor:
             logging.error(f"Pulseira: {self.endereco} | Conexão perdida, devolvendo a posse: {e}")
             self._sessao = None
             await self.estado_rssi.publicar_pendentes()
+            await self.frequencia.publicar_pendentes()
+            self.frequencia.perder_posse()
             await self._publicar_liberacao()
             self._iniciar_varredura()
 
@@ -165,6 +174,9 @@ class Coletor:
         )
         await self._desconectar()
         await self.estado_rssi.publicar_pendentes()
+        # As leituras deste coletor saem antes da liberação, e portanto antes das do novo dono (RF06)
+        await self.frequencia.publicar_pendentes()
+        self.frequencia.perder_posse()
         await self._publicar_liberacao(handoff)
 
 
@@ -210,7 +222,8 @@ class Coletor:
         vontade); a pulseira precisa estar solta para outro coletor vencer a disputa (RF11).
 
         A desconexão é a intencional (RF10), sem reconexão automática. A liberação não é publicada,
-        porque não há broker; na reconexão a presença sai sem pulseira e a posse retida decide o resto.
+        porque não há broker; na reconexão a presença sai sem pulseira e a posse retida decide o resto,
+        inclusive se as leituras de frequência cardíaca guardadas são publicadas ou descartadas (RF17).
         """
         await asyncio.sleep(self.prazo_sem_broker)
         if self.broker.conectado or self._sessao is None:
@@ -263,6 +276,7 @@ class Coletor:
             asyncio.create_task(self.broker.manter_conexao()),
             asyncio.create_task(self.presenca.manter_sinal_de_vida()),
             asyncio.create_task(self.estado_rssi.manter_publicacao()),
+            asyncio.create_task(self.frequencia.manter_publicacao()),
         }
         try:
             await asyncio.wait(tarefas, return_when=asyncio.FIRST_EXCEPTION)

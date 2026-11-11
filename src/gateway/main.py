@@ -608,6 +608,56 @@ async def teste_rf09(duracao: float = 60) -> None:
                    recebidas[-1].conteudo.get("estado") == EstadoConexao.DESCONECTADO.value)
 
 
+async def teste_rf17(duracao: float = 60) -> None:
+    """RF17 - Publicar a frequência cardíaca no broker, conferida por um espião em pulseiras/+/frequencia-cardiaca.
+
+    Sem coordenador, a posse é simulada: concedida na conexão ao broker e reconfirmada a cada reconexão,
+    como faria a posse retida. Durante o teste, `docker stop cnpem_hivemq` por menos de
+    FC_MAX_LEITURAS_SEM_BROKER segundos e `docker start cnpem_hivemq`: o log da FC não para e, na volta,
+    aparece "Publicando N leitura(s) ... guardada(s)". O espião também cai e pode reconectar depois do
+    coletor, perdendo parte das guardadas; o que ele receber deve continuar em ordem e sem repetição.
+    """
+    from mqtt.frequencia_cardiaca import FrequenciaCardiacaColetor
+
+    cliente_id = identificador_coletor()
+    endereco = _config("TARGET_ADDRESS")
+    recebidas: list[Mensagem] = []
+    espiao = await _espiao(Topicos.frequencia_cardiaca("+"), recebidas=recebidas)
+    conexao_broker = ConexaoBroker(cliente_id=cliente_id)
+    frequencia = FrequenciaCardiacaColetor(conexao_broker, endereco)
+    conexao_broker.adicionar_ao_conectar(frequencia.receber_posse)  # Faz o papel da posse retida do coordenador
+    pulseira = ConexaoPulseira(endereco)
+    pulseira.ao_ler_frequencia_cardiaca = frequencia.registrar
+
+    tarefas = [
+        asyncio.create_task(espiao.manter_conexao()),
+        asyncio.create_task(conexao_broker.manter_conexao()),
+        asyncio.create_task(frequencia.manter_publicacao()),
+    ]
+    try:
+        await pulseira.conectar()
+        await pulseira.iniciar_leitura_frequencia_cardiaca()
+        await asyncio.sleep(duracao)
+        frequencia.perder_posse()
+        antes = len(recebidas)
+        await asyncio.sleep(3)  # A pulseira segue conectada e notificando, mas sem a posse
+        sem_posse_nao_publica = len(recebidas) == antes
+    finally:
+        await pulseira.desconectar()
+        await _encerrar(*tarefas)
+
+    if _verificar("espião recebeu frequência cardíaca", bool(recebidas)):
+        primeira = recebidas[0]
+        _verificar("mensagem tem pulseira, coletor e bpm",
+                   primeira.conteudo.get("pulseira") == endereco and primeira.conteudo.get("coletor") == cliente_id
+                   and isinstance(primeira.conteudo.get("bpm"), int))
+        _verificar("timestamps em ordem e sem repetição",
+                   all(a.timestamp < b.timestamp for a, b in zip(recebidas, recebidas[1:])))
+        # RR é opcional (RF15): só informa, porque a pulseira pode não enviar
+        logging.info(f"Leituras com RR: {sum('rr' in m.conteudo for m in recebidas)} de {len(recebidas)}")
+    _verificar("sem a posse, nada é publicado", sem_posse_nao_publica)
+
+
 # ------------------------------------------------------------------ main
 
 async def main() -> None:
@@ -626,6 +676,7 @@ async def main() -> None:
         # await teste_rf10()                # desconexão controlada
         # await teste_rf05()                # reconexão: provoque quedas (desconectar_apos=15 testa a intencional)
         # await teste_rf09()                # BLE + broker
+        # await teste_rf17()                # FC no broker (docker stop/start para o buffer)
         # await espiar("#")                 # num segundo terminal: tudo o que passa no broker
         pass                                # mantém o bloco válido com todos os testes comentados
     except GatewayError as e:
