@@ -35,7 +35,8 @@ class PresencaColetor:
         """Registra no broker a última vontade offline e o anúncio online a cada (re)conexão.
 
         Deve ser criada antes de iniciar `broker.manter_conexao()`, para que a última
-        vontade já esteja registrada na primeira conexão.
+        vontade e o keepalive (igual ao intervalo do sinal de vida, RF11) já valham na
+        primeira conexão.
 
         Args:
             broker (ConexaoBroker): Sessão MQTT do coletor.
@@ -51,6 +52,7 @@ class PresencaColetor:
         self._encerrada = False
 
         self.broker.ultima_vontade = self._ultima_vontade()
+        self.broker.keepalive = self.intervalo  # RF11: keepalive igual ao intervalo do sinal de vida
         self.broker.adicionar_ao_conectar(self.anunciar_online)
 
     @property

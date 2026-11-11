@@ -59,6 +59,7 @@ class Coordenador:
         self._encerrada                                 = False
         
         self.broker.ultima_vontade                      = self._ultima_vontade()
+        self.broker.keepalive                           = self.intervalo # Igual ao sinal de vida, como no coletor (RF11)
         self.broker.adicionar_ao_conectar(self.anunciar_online)
         self.broker.ao_receber                          = self.ao_receber
 

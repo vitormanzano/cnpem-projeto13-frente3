@@ -16,6 +16,29 @@ from mqtt.presenca import PresencaColetor
 from mqtt.conexao import ConexaoBroker
 
 
+PRAZO_SEM_BROKER_PADRAO = 15.0
+
+
+def ler_prazo_sem_broker(prazo: float | None = None) -> float:
+    """Resolve o tempo sem broker, com a pulseira conectada, até soltá-la para a disputa (RF11).
+
+    Se omitido, é lido de PRAZO_SEM_BROKER (padrão de 15 s).
+
+    Raises:
+        ValueError: Se o prazo não for um número maior que zero.
+    """
+    if prazo is None:
+        valor = os.getenv("PRAZO_SEM_BROKER") or str(PRAZO_SEM_BROKER_PADRAO)
+        try:
+            prazo = float(valor)
+        except ValueError as e:
+            raise ValueError(f"PRAZO_SEM_BROKER deve ser um número, recebido {valor!r}.") from e
+
+    if prazo <= 0:
+        raise ValueError("PRAZO_SEM_BROKER deve ser maior que zero.")
+    return prazo
+
+
 def identificador_coletor() -> str:
     """Id do coletor (client id MQTT e {coletor} nos tópicos): o hostname da máquina.
 
@@ -30,10 +53,22 @@ def identificador_coletor() -> str:
 class Coletor:
     """Coletor BLE: Realiza todas as ações que um coletor precisa."""
 
-    def __init__(self, broker: ConexaoBroker, endereco_pulseira: str) -> None:
+    def __init__(
+        self,
+        broker: ConexaoBroker,
+        endereco_pulseira: str,
+        prazo_sem_broker: float | None = None,
+    ) -> None:
         """
+        Args:
+            broker (ConexaoBroker): Sessão MQTT do coletor.
+            endereco_pulseira (str): Endereço BLE da pulseira.
+            prazo_sem_broker (float | None): Segundos sem broker, com a pulseira conectada, até
+                desconectar dela para que possa ser disputada (RF11). Se omitido, é lido de
+                PRAZO_SEM_BROKER (padrão de 15 s).
+
         Raises:
-            ValueError: Se a configuração da conexão ou da reconexão for inválida
+            ValueError: Se a configuração da conexão, da reconexão ou do prazo sem broker for inválida
         """
         self.broker                                           = broker
         self.endereco                                         = endereco_pulseira
@@ -49,6 +84,11 @@ class Coletor:
         self.broker.ao_receber                                = self.ao_receber
         # Lida aqui e não ao receber a posse: inválida, derrubaria só a sessão e a posse ficaria presa
         self._tentativas_reconexao, self._intervalo_reconexao = ler_configuracao_reconexao()
+        self.prazo_sem_broker                                 = ler_prazo_sem_broker(prazo_sem_broker)
+        self._sem_broker: asyncio.Task | None                 = None                       # Espera do prazo sem broker (RF11)
+        self._soltando_sem_broker                             = False
+        self.broker.adicionar_ao_desconectar(self._iniciar_prazo_sem_broker)
+        self.broker.adicionar_ao_conectar(self._cancelar_prazo_sem_broker)
 
 
     @property
@@ -129,15 +169,63 @@ class Coletor:
 
 
     async def _desconectar(self) -> None:
-        if self._sessao is None:
+        # Guarda a sessão: o prazo sem broker e uma posse alheia podem desconectar ao mesmo tempo
+        sessao = self._sessao
+        if sessao is None:
             return
         try:
             await self.conexao.desconectar()
         except FalhaConexao as e:
             logging.error(f"Pulseira: {self.endereco} | {e}")
-        self._sessao.cancel()
-        await asyncio.gather(self._sessao, return_exceptions=True)
-        self._sessao = None
+        sessao.cancel()
+        await asyncio.gather(sessao, return_exceptions=True)
+        if self._sessao is sessao:
+            self._sessao = None
+
+
+    def _iniciar_prazo_sem_broker(self) -> None:
+        """Chamado quando a sessão com o broker cai. Sem a pulseira, não há o que soltar."""
+        if self._sessao is None:
+            return
+        if self._sem_broker is None or self._sem_broker.done():
+            logging.warning(
+                f"Sem broker | Pulseira: {self.endereco} | Desconecta em {self.prazo_sem_broker:g}s "
+                f"se o broker não voltar"
+            )
+            self._sem_broker = asyncio.create_task(self._soltar_apos_prazo())
+
+
+    async def _cancelar_prazo_sem_broker(self) -> None:
+        """Chamado a cada (re)conexão ao broker: o broker voltou antes do prazo."""
+        # Só cancela a espera: a desconexão já começada vai até o fim, senão a pulseira ficaria meio solta
+        if self._sem_broker is None or self._soltando_sem_broker:
+            return
+        self._sem_broker.cancel()
+        await asyncio.gather(self._sem_broker, return_exceptions=True)
+        self._sem_broker = None
+
+
+    async def _soltar_apos_prazo(self) -> None:
+        """Sem broker o coordenador não enxerga este coletor e libera a posse dele (via última
+        vontade); a pulseira precisa estar solta para outro coletor vencer a disputa (RF11).
+
+        A desconexão é a intencional (RF10), sem reconexão automática. A liberação não é publicada,
+        porque não há broker; na reconexão a presença sai sem pulseira e a posse retida decide o resto.
+        """
+        await asyncio.sleep(self.prazo_sem_broker)
+        if self.broker.conectado or self._sessao is None:
+            return
+
+        self._soltando_sem_broker = True
+        try:
+            logging.warning(
+                f"Liberando a pulseira {self.endereco} | Motivo: sem broker há {self.prazo_sem_broker:g}s"
+            )
+            await self._desconectar()
+            # Falha agora (sem broker), mas guarda a pulseira atendida para o online da reconexão
+            await self.presenca.atualizar_pulseira(None)
+        finally:
+            self._soltando_sem_broker = False
 
 
     async def _publicar_liberacao(self, handoff: str | None = None) -> None:
@@ -180,6 +268,10 @@ class Coletor:
             await asyncio.wait(tarefas, return_when=asyncio.FIRST_EXCEPTION)
         finally:
             await self._parar_varredura()
+            if self._sem_broker is not None:
+                self._sem_broker.cancel()
+                await asyncio.gather(self._sem_broker, return_exceptions=True)
+                self._sem_broker = None
             if self._sessao is not None:
                 await self._liberar("encerramento")
             await self.presenca.anunciar_offline()
