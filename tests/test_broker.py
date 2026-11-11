@@ -278,7 +278,7 @@ def test_keepalive_segue_o_intervalo_do_sinal_de_vida():
         assert broker.keepalive_mqtt == 3
 
         broker = ConexaoBroker(cliente_id="coordenador")
-        Coordenador(broker, intervalo=4)
+        Coordenador(broker, intervalo=4, pulseiras=[PULSEIRA])
         assert broker.keepalive_mqtt == 4
 
 

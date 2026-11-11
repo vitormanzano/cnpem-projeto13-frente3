@@ -102,10 +102,11 @@ class Coletor:
 
 
     async def assinar_topicos(self) -> None:
-        """Estados e comandos publicados pelo coordenador."""
-        await self.broker.assinar(Topicos.estado_posse("+"))
-        await self.broker.assinar(Topicos.handoff("+"))
+        """Presença e sinal de vida do coordenador, e posse e handoff da pulseira configurada (RF13)."""
+        await self.broker.assinar(Topicos.estado_posse(self.endereco))
+        await self.broker.assinar(Topicos.handoff(self.endereco))
         await self.broker.assinar(Topicos.presenca_coordenador())
+        await self.broker.assinar(Topicos.sinal_de_vida_coordenador(), qos=0)
 
 
     async def ao_receber(self, topico: str, mensagem: Mensagem) -> None:

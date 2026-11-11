@@ -1,5 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 import time
 from statistics import fmean
 
@@ -49,8 +50,8 @@ class SinalColetor:
 
 
 class VisaoColetores:
-    """Estado da rede montado a partir das mensagens do broker: quem está online,
-    quem enxerga cada pulseira (e com que sinal) e quem tem a posse."""
+    """Estado da rede montado a partir das mensagens do broker: quem está disponível,
+    quem enxerga cada pulseira (e com que sinal) e quem tem a posse (RF13)."""
 
     def __init__(
         self,
@@ -61,25 +62,120 @@ class VisaoColetores:
         self.validade = validade
         self.coletores_online: set[str] = set()
         self.coletores_offline: set[str] = set() # Anunciaram offline
+        self.coletores_sem_sinal: set[str] = set() # Online, mas sem mensagem há mais que o prazo
+        self.pulseira_atendida: dict[str, str | None] = {} # coletor -> pulseira informada na presença
+        self.ultima_mensagem: dict[str, float] = {} # coletor -> time.monotonic() da última mensagem, de qualquer tópico
+        self.ultimo_timestamp: dict[str, datetime] = {} # coletor -> maior timestamp de envelope recebido
         self.sinais: dict[str, dict[str, SinalColetor]] = {} # pulseira -> coletor -> sinal
         self.posse: dict[str, str | None] = {} # pulseira -> coletor responsável
+        self._inicio_contagem = time.monotonic() # Referência do prazo de quem ainda não mandou nada
 
 
-    def atualizar_presenca(self, coletor: str, online: bool) -> bool:
-        """Atualiza a presença do coletor. Retorna true se o estado mudou"""
-        if online: 
+    def atualizar_presenca(self, coletor: str, online: bool, pulseira: str | None = None) -> bool:
+        """Atualiza a presença do coletor e a pulseira que ele diz atender.
+
+        Returns:
+            bool: True se o estado (online/offline) mudou.
+        """
+        if online:
             mudou = coletor not in self.coletores_online
             self.coletores_online.add(coletor)
             self.coletores_offline.discard(coletor)
+            self.pulseira_atendida[coletor] = pulseira
             return mudou
 
         mudou = coletor in self.coletores_online
         self.coletores_online.discard(coletor)
         self.coletores_offline.add(coletor)
+        self.coletores_sem_sinal.discard(coletor)
+        self.pulseira_atendida[coletor] = None
+        # A sessão acabou: a próxima pode vir com o relógio atrás (Raspberry sem RTC reiniciando)
+        self.ultimo_timestamp.pop(coletor, None)
         # Leituras antigas de um coletor offline não podem vencer uma disputa.
         for sinais in self.sinais.values():
             sinais.pop(coletor, None)
         return mudou
+
+
+    def registrar_mensagem(
+        self,
+        coletor: str,
+        timestamp: datetime,
+        agora: float | None = None,
+        aceitar_antiga: bool = False,
+    ) -> bool:
+        """Registra que chegou uma mensagem do coletor, de qualquer tópico (RF13).
+
+        Args:
+            coletor (str): Coletor que publicou.
+            timestamp (datetime): Do envelope, no relógio do coletor; só é comparado com os do mesmo coletor.
+            agora (float | None): time.monotonic() do recebimento. Se omitido, usa o atual.
+            aceitar_antiga (bool): Registra mesmo mais antiga que a última, sem recuar o último timestamp.
+
+        Returns:
+            bool: False se o timestamp for mais antigo que o último recebido do coletor; a mensagem
+                deve ser ignorada e nada é registrado.
+        """
+        ultimo = self.ultimo_timestamp.get(coletor)
+        if ultimo is not None and timestamp < ultimo:
+            if not aceitar_antiga:
+                return False
+        else:
+            self.ultimo_timestamp[coletor] = timestamp
+        self.ultima_mensagem[coletor] = time.monotonic() if agora is None else agora
+        self.coletores_sem_sinal.discard(coletor)
+        return True
+
+
+    def disponivel(self, coletor: str) -> bool:
+        """Presença online e mensagem dentro do prazo de sinal de vida (RF13)."""
+        return coletor in self.coletores_online and coletor not in self.coletores_sem_sinal
+
+
+    def expirar_sem_sinal(self, prazo: float, agora: float | None = None) -> list[str]:
+        """Marca como sem sinal os coletores online sem mensagem há mais que `prazo` (RF13).
+
+        Returns:
+            list[str]: Os que ficaram indisponíveis nesta chamada; os já marcados não se repetem.
+        """
+        agora = time.monotonic() if agora is None else agora
+        expirados = sorted(
+            coletor for coletor in self.coletores_online - self.coletores_sem_sinal
+            if agora - self.ultima_mensagem.get(coletor, self._inicio_contagem) > prazo
+        )
+        self.coletores_sem_sinal.update(expirados)
+        return expirados
+
+
+    def posses_orfas(self, prazo: float, agora: float | None = None) -> list[tuple[str, str]]:
+        """Posses em nome de um coletor indisponível: a posse só vale com o responsável online (RF13).
+
+        O responsável sem presença conhecida ganha `prazo` desde o início da contagem, porque a
+        posse retida pode chegar antes da presença retida.
+
+        Returns:
+            list[tuple[str, str]]: (pulseira, coletor responsável).
+        """
+        agora = time.monotonic() if agora is None else agora
+        em_tolerancia = agora - self._inicio_contagem <= prazo
+        orfas = []
+        for pulseira, dono in self.posse.items():
+            if dono is None or self.disponivel(dono):
+                continue
+            presenca_conhecida = dono in self.coletores_online or dono in self.coletores_offline
+            if em_tolerancia and not presenca_conhecida:
+                continue
+            orfas.append((pulseira, dono))
+        return orfas
+
+
+    def reiniciar_contagem(self, agora: float | None = None) -> None:
+        """Recomeça os prazos de sinal de vida. Chamado a cada (re)conexão do coordenador ao broker:
+        o tempo em que ele não recebia nada não pode contar contra os coletores."""
+        agora = time.monotonic() if agora is None else agora
+        self._inicio_contagem = agora
+        for coletor in self.ultima_mensagem:
+            self.ultima_mensagem[coletor] = agora
 
 
     def registrar_sinal(self, pulseira: str, coletor: str, estado: EstadoConexao, rssi: int | None, amostras: int = 1) -> SinalColetor:
@@ -110,7 +206,7 @@ class VisaoColetores:
 
 
     def sinais_validos(self, pulseira) -> dict[str, SinalColetor]:
-        """Sinais recentes, de coletores online, que de fato enxergam a pulseira.
+        """Sinais recentes, de coletores disponíveis, que de fato enxergam a pulseira.
 
         O filtro é feito na leitura, e não no registro, porque o MQTT só garante ordem
         dentro de um mesmo tópico: O RSSI de um coletor pode chegar antes da presença dele.
@@ -118,7 +214,7 @@ class VisaoColetores:
         agora = time.monotonic()
         resultado = {}
         for coletor, sinal in self.sinais.get(pulseira, {}).items():
-            if (coletor in self.coletores_online
+            if (self.disponivel(coletor)
                 and agora - sinal.recebido_em <= self.validade
                 and sinal.rssi is not None
             ):
@@ -135,17 +231,34 @@ class VisaoColetores:
     def __str__(self) -> str:
         """Retrato da visão do coordenador, em várias linhas, para o log.
 
-        Legenda: `*` = coletor com a posse; `[offline]` = coletor fora de `coletores_online`;
+        Legenda: `*` = coletor com a posse; `[indisponivel]` = coletor offline ou sem sinal de vida;
         `[expirado]` = leitura mais velha que `validade`. Sinais marcados não entram em disputa.
         """
         online = ", ".join(sorted(self.coletores_online)) or "nenhum"
         linhas = [f"Visão dos coletores | online: [{online}] | janela: {self.tamanho_janela} | validade: {self.validade:g}s"]
 
+        agora = time.monotonic()
+        coletores = sorted(self.coletores_online | self.coletores_offline | self.ultima_mensagem.keys())
+        for coletor in coletores:
+            if coletor in self.coletores_sem_sinal:
+                presenca = "sem-sinal"
+            elif coletor in self.coletores_online:
+                presenca = "online"
+            elif coletor in self.coletores_offline:
+                presenca = "offline"
+            else:
+                presenca = "desconhecida"
+            visto = self.ultima_mensagem.get(coletor)
+            idade = "-" if visto is None else f"há {agora - visto:.1f}s"
+            linhas.append(
+                f"  Coletor {coletor:<20} | presença: {presenca:<12} | "
+                f"pulseira: {self.pulseira_atendida.get(coletor) or '-'} | última mensagem: {idade}"
+            )
+
         pulseiras = sorted(self.sinais.keys() | self.posse.keys())
         if not pulseiras:
             linhas.append("  (nenhuma pulseira conhecida)")
 
-        agora = time.monotonic()
         for pulseira in pulseiras:
             dono = self.posse.get(pulseira)
             linhas.append(f"  Pulseira {pulseira} | posse: {dono or 'ninguém'}")
@@ -155,8 +268,8 @@ class VisaoColetores:
             for coletor, sinal in sorted(sinais.items()):
                 marca = "*" if coletor == dono else " "
                 avisos = []
-                if coletor not in self.coletores_online:
-                    avisos.append("[offline]")
+                if not self.disponivel(coletor):
+                    avisos.append("[indisponivel]")
                 if agora - sinal.recebido_em > self.validade:
                     avisos.append("[expirado]")
                 linhas.append(f"    {marca} {coletor:<20} {sinal} {' '.join(avisos)}".rstrip())

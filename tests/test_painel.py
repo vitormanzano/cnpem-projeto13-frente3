@@ -299,7 +299,7 @@ def test_limiar_do_painel_e_o_do_coordenador():
         assert Painel(BrokerFalso(), [PULSEIRA]).visao.limiar == LIMIAR_CONEXAO_FRACA_PADRAO == -78
     with ambiente(LIMIAR_CONEXAO_FRACA="-75"):
         assert Painel(BrokerFalso(), [PULSEIRA]).visao.limiar == -75
-        assert Coordenador(BrokerFalso("coordenador")).limiar == -75
+        assert Coordenador(BrokerFalso("coordenador"), pulseiras=[PULSEIRA]).limiar == -75
 
 
 def test_classificacao_do_sinal_nas_fronteiras():

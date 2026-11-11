@@ -7,6 +7,7 @@ import uuid
 import aiomqtt
 from bluetooth.domain.erros import BrokerIndisponivel
 from bluetooth.domain.models import EstadoConexao
+from bluetooth.scanner import ler_endereco_pulseira
 from coordenador.visao import SinalColetor, VisaoColetores
 from mqtt.conexao import ConexaoBroker
 from mqtt.domain.models import EstadoPresenca, Mensagem, TipoMensagem
@@ -22,6 +23,61 @@ INTERVALO_VERFICACAO           = 0.5 # s entre verificações durante a extensã
 LIMIAR_CONEXAO_FRACA_PADRAO    = -78
 LEITURAS_FRACAS_PADRAO         = 3
 PRAZO_LIBERACAO_PADRAO         = 3.0 # s para a origem confirmar que soltou
+PRAZO_SINAL_DE_VIDA_PADRAO     = 15.0 # s sem mensagem até o coletor ficar indisponível (RF13)
+INTERVALO_VERIFICACAO_COLETORES = 1.0 # s entre as verificações de sinal de vida e posse órfã
+
+
+def ler_pulseiras_acompanhadas(pulseiras: list[str] | None = None) -> frozenset[str]:
+    """Resolve as pulseiras que o coordenador acompanha (RF13, RF19).
+
+    Args:
+        pulseiras (list[str] | None): Endereços MAC. Se omitido, são lidos de PULSEIRAS (separados
+            por vírgula) ou, sem ela, de TARGET_ADDRESS (na versão atual há uma só pulseira).
+
+    Returns:
+        frozenset[str]: Endereços em maiúsculas.
+
+    Raises:
+        ValueError: Se nenhuma pulseira estiver configurada ou algum endereço não for um MAC válido.
+    """
+    if pulseiras is None:
+        valor = os.getenv("PULSEIRAS") or os.getenv("TARGET_ADDRESS") or ""
+        pulseiras = [pulseira for pulseira in valor.split(",") if pulseira.strip()]
+
+    # Sem pulseiras o coordenador ignoraria todas as mensagens: melhor falhar na inicialização
+    if not pulseiras:
+        raise ValueError("O coordenador precisa conhecer as pulseiras que acompanha. Defina PULSEIRAS (ou TARGET_ADDRESS).")
+
+    enderecos: set[str] = set()
+    for pulseira in pulseiras:
+        try:
+            enderecos.add(ler_endereco_pulseira(pulseira))
+        except ValueError as e:
+            raise ValueError(
+                f"Endereço de pulseira inválido: {pulseira!r} (PULSEIRAS ou TARGET_ADDRESS). "
+                "Use endereços MAC no formato AA:BB:CC:DD:EE:FF, separados por vírgula."
+            ) from e
+    return frozenset(enderecos)
+
+
+def ler_prazo_sinal_de_vida(prazo: float | None = None) -> float:
+    """Resolve o tempo sem nenhuma mensagem de um coletor até considerá-lo indisponível (RF13).
+
+    Se omitido, é lido de PRAZO_SINAL_DE_VIDA_COLETOR (padrão de 15 s).
+
+    Raises:
+        ValueError: Se o prazo não for um número maior que zero.
+    """
+    if prazo is None:
+        valor = os.getenv("PRAZO_SINAL_DE_VIDA_COLETOR") or str(PRAZO_SINAL_DE_VIDA_PADRAO)
+        try:
+            prazo = float(valor)
+        except ValueError as e:
+            raise ValueError(f"PRAZO_SINAL_DE_VIDA_COLETOR deve ser um número, recebido {valor!r}.") from e
+
+    if prazo <= 0:
+        raise ValueError("PRAZO_SINAL_DE_VIDA_COLETOR deve ser maior que zero.")
+    return prazo
 
 
 def ler_intervalo_sinal_de_vida(intervalo: float | None = None) -> float:
@@ -64,27 +120,57 @@ def ler_limiar_conexao_fraca(limiar: int | None = None) -> int:
     return limiar
 
 
+def _inteiro(valor: object, campo: str, nulo: bool = False) -> int | None:
+    """Campo inteiro do conteúdo de uma mensagem (RF15).
+
+    Raises:
+        TypeError: Se não for inteiro (ou None, com `nulo`).
+    """
+    if valor is None and nulo:
+        return None
+    # type() e não isinstance(): bool é subclasse de int (mesmo cuidado do Mensagem.de_json)
+    if type(valor) is not int:
+        raise TypeError(f"{campo} {valor!r} não é inteiro")
+    return valor
+
+
 class Coordenador:
     """Responsável por gerenciar as conexões entre coletores e pulseiras."""
 
-    def __init__(self, broker: "ConexaoBroker", intervalo: float | None = None) -> None:
+    def __init__(
+        self,
+        broker: "ConexaoBroker",
+        intervalo: float | None = None,
+        pulseiras: list[str] | None = None,
+        prazo_sinal_de_vida: float | None = None,
+    ) -> None:
         """Registra sua presença e coordena os coletores.
             Args:
                 broker (ConexaoBroker): Sessão MQTT do coletor.
-                intervalo (float | None): Segundos entre os sinais de vida. Se omitido, é lido 
+                intervalo (float | None): Segundos entre os sinais de vida. Se omitido, é lido
                     de PRESENCA_INTERVALO (padrão de 5 s).
+                pulseiras (list[str] | None): Pulseiras acompanhadas; mensagens de outras são ignoradas
+                    (RF13). Se omitido, são lidas de PULSEIRAS ou TARGET_ADDRESS.
+                prazo_sinal_de_vida (float | None): Segundos sem mensagem de um coletor até considerá-lo
+                    indisponível (RF13). Se omitido, é lido de PRAZO_SINAL_DE_VIDA_COLETOR (padrão de 15 s).
 
             Raises:
-                ValueError: Se o intervalo for válido.
+                ValueError: Se o intervalo, as pulseiras ou o prazo de sinal de vida forem inválidos.
         """
         self.broker:           ConexaoBroker            = broker
         self.intervalo:        float                    = ler_intervalo_sinal_de_vida(intervalo)
+        self.pulseiras:        frozenset[str]           = ler_pulseiras_acompanhadas(pulseiras)
+        self.prazo_sinal_de_vida: float                 = ler_prazo_sinal_de_vida(prazo_sinal_de_vida)
         self.visao                                      = VisaoColetores()
         self._encerrada                                 = False
-        
+        self._ouvindo                                   = False # Conectado, com a contagem de sinal de vida reiniciada
+        self._pulseiras_ignoradas: set[str]             = set() # Não configuradas, já avisadas no log
+
         self.broker.ultima_vontade                      = self._ultima_vontade()
         self.broker.keepalive                           = self.intervalo # Igual ao sinal de vida, como no coletor (RF11)
         self.broker.adicionar_ao_conectar(self.anunciar_online)
+        self.broker.adicionar_ao_conectar(self._reiniciar_contagem)
+        self.broker.adicionar_ao_desconectar(self._parar_contagem)
         self.broker.ao_receber                          = self.ao_receber
 
         self.janela_disputa                             = float(os.getenv("JANELA_DISPUTA", JANELA_DISPUTA_PADRAO))
@@ -103,22 +189,29 @@ class Coordenador:
 
 
     async def assinar_topicos(self) -> None:
-        """Assina, presença, sinal e posse de todos os coletores e pulseiras.
+        """Assina presença, sinal de vida, estado/RSSI e liberação de todos os coletores, e a posse
+        retida (RF13).
+
+        O curinga vale também para as pulseiras: assim as não configuradas chegam e são
+        registradas em log antes de ignoradas.
 
         Pode ser chamado antes de conectar: a ConexaoBroker refaz as assinaturas de cada
         (re)conexão, e o broker entrega na hora as mensagens retidas de presença e posse.
         """
         await self.broker.assinar(Topicos.presenca_coletor("+"))
+        await self.broker.assinar(Topicos.sinal_de_vida_coletor("+"), qos=0)
         await self.broker.assinar(Topicos.estado_rssi("+", "+"), qos=0)
         await self.broker.assinar(Topicos.estado_posse("+"))
         await self.broker.assinar(Topicos.liberacao_posse("+"))
 
-    
+
     async def ao_receber(self, topico: str, mensagem: Mensagem) -> None:
         """Encaminha cada mensagem pelo tipo; o tópico só é usado para extrair os ids."""
         match mensagem.tipo:
             case TipoMensagem.PRESENCA:
                 await self._tratar_presenca(topico, mensagem)
+            case TipoMensagem.SINAL_DE_VIDA:
+                self._tratar_sinal_de_vida(topico, mensagem)
             case TipoMensagem.ESTADO_PULSEIRA:
                 await self._tratar_sinal(topico, mensagem)
             case TipoMensagem.POSSE:
@@ -127,27 +220,102 @@ class Coordenador:
                 await self._tratar_liberacao(topico, mensagem)
 
 
+    def _acompanha(self, pulseira: str, topico: str) -> bool:
+        """Se a pulseira está configurada (RF13). A não configurada vai para o log em WARNING na
+        primeira mensagem e em DEBUG nas seguintes, porque o RSSI dela chega a cada segundo."""
+        if pulseira in self.pulseiras:
+            return True
+        nivel = logging.DEBUG if pulseira in self._pulseiras_ignoradas else logging.WARNING
+        self._pulseiras_ignoradas.add(pulseira)
+        logging.log(nivel, f"Mensagem ignorada | Tópico: {topico} | Pulseira {pulseira} não configurada (PULSEIRAS)")
+        return False
+
+
+    def _registrar_mensagem(self, coletor: str, topico: str, mensagem: Mensagem, aceitar_antiga: bool = False) -> bool:
+        """Confere a ordem e renova o sinal de vida do coletor, considerando todos os tópicos dele (RF13).
+
+        Returns:
+            bool: False se a mensagem for mais antiga que a última do coletor e deve ser ignorada.
+        """
+        estava_sem_sinal = coletor in self.visao.coletores_sem_sinal
+        if not self.visao.registrar_mensagem(coletor, mensagem.timestamp, aceitar_antiga=aceitar_antiga):
+            # Estado/RSSI e sinal de vida são frequentes e a perda de um é compensada pelo seguinte (RF15)
+            frequente = mensagem.tipo in (TipoMensagem.ESTADO_PULSEIRA, TipoMensagem.SINAL_DE_VIDA)
+            logging.log(
+                logging.DEBUG if frequente else logging.WARNING,
+                f"Mensagem antiga ignorada | Tópico: {topico} | Coletor: {coletor} | "
+                f"Timestamp: {mensagem.timestamp.isoformat()} | Último: {self.visao.ultimo_timestamp[coletor].isoformat()}"
+            )
+            return False
+        if estava_sem_sinal and self.visao.disponivel(coletor):
+            logging.info(f"Coletor disponível | Coletor: {coletor} | Sinal de vida voltou")
+        return True
+
+
     async def _tratar_presenca(self, topico: str, mensagem: Mensagem) -> None:
         coletor = Topicos.extrair_presenca_coletor(topico)
         if coletor is None:
             return
 
-        online = mensagem.conteudo.get("estado") == EstadoPresenca.ONLINE.value
+        try:
+            if mensagem.origem != coletor:
+                raise ValueError(f"origem {mensagem.origem!r} não é o coletor do tópico")
+            estado = EstadoPresenca(mensagem.conteudo["estado"])
+            pulseira = mensagem.conteudo.get("pulseira")
+            if pulseira is not None and (not isinstance(pulseira, str) or not pulseira):
+                raise TypeError(f"pulseira {pulseira!r} não é um endereço")
+        except (ValueError, TypeError) as e:
+            logging.warning(f"Presença descartada | Tópico: {topico} | Conteúdo inválido [{type(e).__name__}]: {e}")
+            return
+
+        online = estado is EstadoPresenca.ONLINE
+        # A última vontade leva o timestamp do registro, não o da queda (PresencaColetor._ultima_vontade),
+        # então o offline vale mesmo mais antigo que a última mensagem do coletor
+        if not self._registrar_mensagem(coletor, topico, mensagem, aceitar_antiga=not online):
+            return
+
         # Só registra mudança: a presença também é republicada a cada reconexão e troca de pulseira
-        if self.visao.atualizar_presenca(coletor, online):
-            estado = EstadoPresenca.ONLINE if online else EstadoPresenca.OFFLINE
+        if self.visao.atualizar_presenca(coletor, online, pulseira if online else None):
             logging.info(f"Presença | Coletor: {coletor} | {estado.value}")
 
         if not online:
-            for pulseira in self.visao.pulseiras_de(coletor):
-                await self._liberar_posse_orfa(pulseira, coletor)
+            for pulseira_orfa in self.visao.pulseiras_de(coletor):
+                await self._liberar_posse_orfa(pulseira_orfa, coletor)
+            return
+        self._conferir_pulseira_atendida(coletor, pulseira)
+
+
+    def _conferir_pulseira_atendida(self, coletor: str, pulseira: str | None) -> None:
+        """Na divergência entre a presença e a posse retida, vale a posse (RF13): a presença só fica
+        registrada. Se o responsável não estiver online, a verificação periódica libera a posse."""
+        com_posse = self.visao.pulseiras_de(coletor)
+        if com_posse == ([] if pulseira is None else [pulseira]):
+            return
+        logging.info(
+            f"Presença diverge da posse | Coletor: {coletor} | Presença: {pulseira or 'nenhuma'} | "
+            f"Posse: {', '.join(com_posse) or 'nenhuma'} | Vale a posse"
+        )
+
+
+    def _tratar_sinal_de_vida(self, topico: str, mensagem: Mensagem) -> None:
+        coletor = Topicos.extrair_sinal_de_vida_coletor(topico)
+        if coletor is None:
+            return
+        if mensagem.origem != coletor:
+            logging.warning(f"Sinal de vida descartado | Tópico: {topico} | origem {mensagem.origem!r} não é o coletor do tópico")
+            return
+        if self._registrar_mensagem(coletor, topico, mensagem):
+            logging.debug(f"Sinal de vida | Coletor: {coletor}")
 
 
     async def _tratar_posse(self, topico: str, mensagem: Mensagem) -> None:
         pulseira = Topicos.extrair_estado_posse(topico)
-        if pulseira is None:
+        if pulseira is None or not self._acompanha(pulseira, topico):
             return
-        dono = mensagem.conteudo.get("coletor")
+        dono = mensagem.conteudo["coletor"]
+        if mensagem.conteudo["pulseira"] != pulseira or (dono is not None and (not isinstance(dono, str) or not dono)):
+            logging.warning(f"Posse descartada | Tópico: {topico} | Conteúdo inválido: {mensagem.conteudo}")
+            return
         self.visao.atualizar_posse(pulseira, dono)
 
         # Posse retida em um coletor que já caiu (ex: coordenador reiniciou)
@@ -163,7 +331,7 @@ class Coordenador:
             liberada.set()
             return
 
-        logging.info(f"Posse liberada | Pulseira: {pulseira} | Motivo: coletor {coletor} offline.")
+        logging.info(f"Posse liberada | Pulseira: {pulseira} | Motivo: coletor {coletor} indisponível.")
         self._leituras_fracas.pop(pulseira, None)
         try:
             await self._publicar_posse(pulseira, None)
@@ -173,25 +341,30 @@ class Coordenador:
 
     async def _tratar_sinal(self, topico: str, mensagem: Mensagem) -> None:
         ids = Topicos.extrair_estado_rssi(topico)
-        if ids is None: 
+        if ids is None:
             return
         coletor, pulseira = ids
-
-        if mensagem.origem != coletor:
-            logging.warning(f"Sinal descartado | {topico} | origem {mensagem.origem} não é o coletor do tópico")
+        if not self._acompanha(pulseira, topico):
             return
 
         try:
+            if mensagem.origem != coletor:
+                raise ValueError(f"origem {mensagem.origem!r} não é o coletor do tópico")
+            if mensagem.conteudo["pulseira"] != pulseira:
+                raise ValueError(f"pulseira {mensagem.conteudo['pulseira']!r} não é a do tópico")
             estado = EstadoConexao(mensagem.conteudo["estado"])
-            rssi = mensagem.conteudo.get("rssi")
-            rssi = None if rssi is None else int(rssi)
-            amostras = int(mensagem.conteudo.get("amostras") or 1) # Leituras de conexão ativa vale 1
+            rssi = _inteiro(mensagem.conteudo["rssi"], "rssi", nulo=True)
+            amostras = _inteiro(mensagem.conteudo.get("amostras", 1), "amostras") # Leitura da conexão ativa vale 1
+            if amostras < 1:
+                raise ValueError(f"amostras {amostras} deve ser maior que zero")
         except (KeyError, ValueError, TypeError) as e:
             logging.warning(f"Sinal descartado | {topico} | conteúdo inválido [{type(e).__name__}]: {e}")
             return
         if estado is EstadoConexao.CONEXAO_FRACA:
             # Quem classifica conexao-fraca é o coordenador (RF19); o coletor não publica esse estado (RF15)
             logging.warning(f"Sinal descartado | {topico} | estado {estado.value} não vem do coletor")
+            return
+        if not self._registrar_mensagem(coletor, topico, mensagem):
             return
 
         sinal = self.visao.registrar_sinal(pulseira, coletor, estado, rssi, amostras)
@@ -206,13 +379,18 @@ class Coordenador:
 
     async def _tratar_liberacao(self, topico: str, mensagem: Mensagem) -> None:
         pulseira = Topicos.extrair_liberacao_posse(topico)
-        if pulseira is None:
+        if pulseira is None or not self._acompanha(pulseira, topico):
+            return
+        handoff = mensagem.conteudo.get("handoff")
+        if mensagem.conteudo["pulseira"] != pulseira or (handoff is not None and not isinstance(handoff, str)):
+            logging.warning(f"Liberação descartada | Tópico: {topico} | Conteúdo inválido: {mensagem.conteudo}")
+            return
+        if not self._registrar_mensagem(mensagem.origem, topico, mensagem):
             return
         if mensagem.origem != self.visao.posse.get(pulseira):
             logging.warning(f"Liberação descartada | Pulseira: {pulseira} | {mensagem.origem} não é o dono.")
             return
 
-        handoff = mensagem.conteudo.get("handoff")
         logging.info(
             f"Liberação recebida | Pulseira: {pulseira} | Coletor: {mensagem.origem}"
             + (f" | Handoff: {handoff}" if handoff else "")
@@ -340,6 +518,40 @@ class Coordenador:
                 logging.debug("Sinal de vida | Coordenador")
             except BrokerIndisponivel as e:
                 logging.warning(f"Erro: {BrokerIndisponivel.codigo} | Coordenador | Sinal de vida não publicado: {e}")
+
+
+    async def manter_verificacao_coletores(self) -> None:
+        """A cada INTERVALO_VERIFICACAO_COLETORES, considera indisponível o coletor sem mensagem há mais
+        que o prazo e libera a posse retida em nome de quem não está disponível (RF13, RF14).
+
+        Fica parada enquanto o coordenador está sem broker: sem receber nada, todos pareceriam sem sinal.
+        """
+        while not self._encerrada:
+            await asyncio.sleep(INTERVALO_VERIFICACAO_COLETORES)
+            if self._encerrada or not self._ouvindo:
+                continue
+            await self._verificar_coletores()
+
+
+    async def _verificar_coletores(self, agora: float | None = None) -> None:
+        agora = time.monotonic() if agora is None else agora
+        for coletor in self.visao.expirar_sem_sinal(self.prazo_sinal_de_vida, agora):
+            logging.warning(
+                f"Coletor indisponível | Coletor: {coletor} | Motivo: sem sinal de vida há mais de {self.prazo_sinal_de_vida:g} s"
+            )
+        for pulseira, dono in self.visao.posses_orfas(self.prazo_sinal_de_vida, agora):
+            await self._liberar_posse_orfa(pulseira, dono)
+
+
+    def _reiniciar_contagem(self) -> None:
+        """A cada (re)conexão ao broker, depois de refazer as assinaturas: o tempo sem broker não conta contra os coletores."""
+        self.visao.reiniciar_contagem()
+        self._ouvindo = True
+
+
+    def _parar_contagem(self) -> None:
+        """A sessão com o broker caiu: sem receber nada, nenhum coletor pode ser dado como sem sinal."""
+        self._ouvindo = False
 
 
     async def registrar_visao(self) -> None:
@@ -494,6 +706,7 @@ class Coordenador:
         tarefas = {
             asyncio.create_task(self.broker.manter_conexao()),
             asyncio.create_task(self.manter_sinal_de_vida()),
+            asyncio.create_task(self.manter_verificacao_coletores()),
             asyncio.create_task(self.registrar_visao()),
         }
         try:

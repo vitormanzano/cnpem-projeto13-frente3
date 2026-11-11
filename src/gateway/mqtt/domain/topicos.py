@@ -21,6 +21,15 @@ class Topicos:
 
 
     @staticmethod
+    def extrair_sinal_de_vida_coletor(topico: str) -> str | None:
+        """Devolve o coletor de coletores/{coletor}/sinal-de-vida, ou None se o tópico for outro."""
+        partes = topico.split("/")
+        if len(partes) == 3 and partes[0] == "coletores" and partes[2] == "sinal-de-vida":
+            return partes[1]
+        return None
+
+
+    @staticmethod
     def estado_rssi(coletor: str, pulseira: str) -> str:
         """Coletor: Estado e RSSI"""
         return f"coletores/{coletor}/pulseiras/{pulseira}"

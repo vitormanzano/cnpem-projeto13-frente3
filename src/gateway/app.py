@@ -41,7 +41,10 @@ async def rodar_coletor() -> None:
 async def rodar_coordenador() -> None:
     cliente_id = os.getenv("COORDENADOR_ID", "coordenador")
     logging.info(f"Iniciando como coordenador | id {cliente_id}")
-    coordenador = Coordenador(ConexaoBroker(cliente_id=cliente_id))
+    try:
+        coordenador = Coordenador(ConexaoBroker(cliente_id=cliente_id))
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
     await coordenador.assinar_topicos()
     await coordenador.executar()
 

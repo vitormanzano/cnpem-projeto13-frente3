@@ -289,7 +289,7 @@ def test_presenca_do_coletor_acompanha_a_posse():
 def test_sinal_de_vida_do_coordenador_vai_para_topico_proprio():
     async def cenario():
         broker = BrokerFalso(COORDENADOR)
-        coordenador = Coordenador(broker, intervalo=0.01)
+        coordenador = Coordenador(broker, intervalo=0.01, pulseiras=[PULSEIRA])
         tarefa = asyncio.create_task(coordenador.manter_sinal_de_vida())
         try:
             await aguardar(lambda: len(broker.publicadas) >= 2)
@@ -338,7 +338,7 @@ def test_liberacao_do_coletor_responde_ao_handoff_com_o_id():
 def test_handoff_do_coordenador_tem_id_que_aparece_no_log_ate_a_disputa():
     async def cenario():
         broker = BrokerFalso(COORDENADOR)
-        coordenador = Coordenador(broker)
+        coordenador = Coordenador(broker, pulseiras=[PULSEIRA])
         coordenador.janela_handoff = 3600  # a disputa não termina durante o teste
         coordenador.visao.atualizar_posse(PULSEIRA, COLETOR)
         coordenador._leituras_fracas[PULSEIRA] = coordenador.minimo_fracas
@@ -370,7 +370,7 @@ def test_handoff_do_coordenador_tem_id_que_aparece_no_log_ate_a_disputa():
 
 def test_coordenador_descarta_conexao_fraca_publicada_por_coletor():
     async def cenario():
-        coordenador = Coordenador(BrokerFalso(COORDENADOR))
+        coordenador = Coordenador(BrokerFalso(COORDENADOR), pulseiras=[PULSEIRA])
 
         def sinal(estado: str) -> Mensagem:
             return Mensagem(TipoMensagem.ESTADO_PULSEIRA, COLETOR, {"pulseira": PULSEIRA, "estado": estado, "rssi": -80})
