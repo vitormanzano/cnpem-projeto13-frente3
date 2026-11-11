@@ -16,11 +16,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "gateway"))
 
 from bluetooth.domain.models import EstadoConexao  # noqa: E402
-from coletor.coletor import Coletor  # noqa: E402
+from coletor.coletor import Coletor, ler_prazo_conexao  # noqa: E402
 from coordenador.coordenador import (  # noqa: E402
-    PRAZO_SINAL_DE_VIDA_PADRAO, Coordenador, ler_prazo_sinal_de_vida, ler_pulseiras_acompanhadas,
+    PRAZO_SINAL_DE_VIDA_PADRAO, Coordenador, ler_fator_extensao, ler_janela_disputa, ler_margem_histerese,
+    ler_minimo_amostras, ler_prazo_sinal_de_vida, ler_pulseiras_acompanhadas,
 )
-from coordenador.visao import VisaoColetores  # noqa: E402
+from coordenador.decisao import escolher_coletor  # noqa: E402
+from coordenador.visao import Candidato, VisaoColetores  # noqa: E402
 from mqtt.domain.models import Mensagem, TipoMensagem  # noqa: E402
 from mqtt.domain.topicos import Topicos  # noqa: E402
 
@@ -112,8 +114,13 @@ def sinal_de_vida(coletor: str, t: float) -> tuple[str, Mensagem]:
     return Topicos.sinal_de_vida_coletor(coletor), Mensagem(TipoMensagem.SINAL_DE_VIDA, coletor, {}, timestamp=ts(t))
 
 
-def estado_rssi(coletor: str, t: float, rssi: object = -60, estado: str = "conectado", pulseira: str = PULSEIRA) -> tuple[str, Mensagem]:
+def estado_rssi(
+    coletor: str, t: float, rssi: object = -60, estado: str = "conectado", pulseira: str = PULSEIRA,
+    amostras: int | None = None,
+) -> tuple[str, Mensagem]:
     conteudo = {"pulseira": pulseira, "estado": estado, "rssi": rssi}
+    if amostras is not None:  # só a varredura publica amostras (RF18)
+        conteudo["amostras"] = amostras
     return Topicos.estado_rssi(coletor, pulseira), Mensagem(TipoMensagem.ESTADO_PULSEIRA, coletor, conteudo, timestamp=ts(t))
 
 
@@ -294,15 +301,18 @@ def test_coletor_sem_sinal_de_vida_perde_a_posse_e_nao_entra_em_disputa():
     async def cenario():
         coordenador, broker = montar()
         try:
-            await entregar(coordenador, presenca(COLETOR_A, "online", 0), posse(COLETOR_A), estado_rssi(COLETOR_A, 1))
-            assert coordenador.visao.sinais_validos(PULSEIRA)
+            await entregar(
+                coordenador, presenca(COLETOR_A, "online", 0), posse(COLETOR_A),
+                estado_rssi(COLETOR_A, 1, estado="desconectado", amostras=10),
+            )
+            assert coordenador.visao.candidatos(PULSEIRA, desde=0)
 
             with capturar_log() as log:
                 await coordenador._verificar_coletores(agora=time.monotonic() + PRAZO + 1)
 
             assert not coordenador.visao.disponivel(COLETOR_A)
             assert broker.posses() == [{"pulseira": PULSEIRA, "coletor": None}]
-            assert not coordenador.visao.sinais_validos(PULSEIRA)
+            assert not coordenador.visao.candidatos(PULSEIRA, desde=0)
             assert any(r.levelno == logging.WARNING and "Coletor indisponível" in r.getMessage() for r in log)
         finally:
             await desmontar(coordenador)
@@ -473,6 +483,252 @@ def test_offline_da_ultima_vontade_vale_mesmo_mais_antigo_e_recomeca_a_ordem():
             # Reiniciado com o relógio atrás (Raspberry sem RTC): a nova sessão é aceita
             await entregar(coordenador, presenca(COLETOR_A, "online", 5))
             assert coordenador.visao.disponivel(COLETOR_A)
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+# ------------------------------------------------------------------ disputa pela posse (RF14)
+
+def varredura(coletor: str, t: float, rssi: int, amostras: int = 10) -> tuple[str, Mensagem]:
+    """Mediana publicada pela varredura (RF18), com a posse liberada."""
+    return estado_rssi(coletor, t, rssi=rssi, estado="desconectado", amostras=amostras)
+
+
+def montar_disputa(janela: float = 0.05, prazo_conexao: float = 0.1) -> tuple[Coordenador, BrokerFalso]:
+    """Coordenador com janela e prazo de conexão curtos, para a disputa terminar durante o teste."""
+    coordenador, broker = montar()
+    coordenador.janela_disputa = janela
+    coordenador.prazo_conexao = prazo_conexao
+    return coordenador, broker
+
+
+async def aguardar(condicao: Callable[[], bool], tempo: float = 2.0) -> None:
+    async def esperar() -> None:
+        while not condicao():
+            await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(esperar(), tempo)
+
+
+def donos(broker: BrokerFalso) -> list[str | None]:
+    return [conteudo["coletor"] for conteudo in broker.posses()]
+
+
+def test_configuracao_da_disputa_padrao_por_ambiente_e_invalida():
+    vazias = dict(JANELA_DISPUTA="", FATOR_EXTENSAO_JANELA="", MARGEM_HISTERESE="", MINIMO_AMOSTRAS="", PRAZO_CONEXAO="")
+    with ambiente(**vazias):
+        assert (ler_janela_disputa(), ler_fator_extensao(), ler_margem_histerese()) == (3.0, 3.0, 5.0)
+        assert (ler_minimo_amostras(), ler_prazo_conexao()) == (5, 5.0)
+    with ambiente(JANELA_DISPUTA="2", MINIMO_AMOSTRAS="4", PRAZO_CONEXAO="7"):
+        assert (ler_janela_disputa(), ler_minimo_amostras(), ler_prazo_conexao()) == (2.0, 4, 7.0)
+        assert ler_janela_disputa(1.5) == 1.5  # argumento explícito vence o ambiente
+
+    invalidas = [
+        lambda: ler_janela_disputa(0), lambda: ler_fator_extensao(0.5), lambda: ler_margem_histerese(-1),
+        lambda: ler_minimo_amostras(0), lambda: ler_prazo_conexao(0),
+    ]
+    for ler in invalidas:
+        try:
+            ler()
+        except ValueError:
+            continue
+        raise AssertionError("configuração inválida aceita")
+    with ambiente(MINIMO_AMOSTRAS="cinco"):
+        try:
+            ler_minimo_amostras()
+        except ValueError as e:
+            assert "MINIMO_AMOSTRAS" in str(e)
+        else:
+            raise AssertionError("MINIMO_AMOSTRAS não numérico aceito")
+
+
+def test_vence_o_maior_rssi_suavizado():
+    candidatos = {COLETOR_A: Candidato(-70.0, 10, 1.0), COLETOR_B: Candidato(-60.0, 10, 2.0)}
+    assert escolher_coletor(candidatos, favorito=None, margem=5) == COLETOR_B
+    assert escolher_coletor({}, favorito=COLETOR_A) is None
+
+
+def test_empate_vence_o_favorito_e_sem_ele_quem_publicou_primeiro():
+    candidatos = {COLETOR_A: Candidato(-60.0, 10, 2.0), COLETOR_B: Candidato(-60.0, 10, 1.0)}
+    assert escolher_coletor(candidatos, favorito=COLETOR_A, margem=0) == COLETOR_A
+    assert escolher_coletor(candidatos, favorito=None, margem=0) == COLETOR_B  # chegou primeiro, não o menor id
+    tres = candidatos | {"coletor-c": Candidato(-80.0, 10, 0.5)}
+    assert escolher_coletor(tres, favorito="coletor-c", margem=0) == COLETOR_B  # favorito fora do empate
+
+
+def test_favorito_so_perde_pela_margem_e_sem_sinal_perde_sem_margem():
+    favorito = Candidato(-70.0, 10, 1.0)
+    assert escolher_coletor({COLETOR_A: favorito, COLETOR_B: Candidato(-66.0, 10, 2.0)}, COLETOR_A, margem=5) == COLETOR_A
+    assert escolher_coletor({COLETOR_A: favorito, COLETOR_B: Candidato(-65.0, 10, 2.0)}, COLETOR_A, margem=5) == COLETOR_B
+    # Sem sinal válido na janela, o favorito não protege nada
+    assert escolher_coletor({COLETOR_B: Candidato(-90.0, 10, 2.0)}, COLETOR_A, margem=5) == COLETOR_B
+
+
+def test_rssi_suavizado_pondera_so_as_medianas_validas_da_janela():
+    visao = VisaoColetores(minimo_amostras=5)
+    visao.atualizar_presenca(COLETOR_A, True)
+    visao.registrar_sinal(PULSEIRA, COLETOR_A, EstadoConexao.DESCONECTADO, -40, 20)  # antes da janela
+    inicio = time.monotonic()
+    visao.registrar_sinal(PULSEIRA, COLETOR_A, EstadoConexao.DESCONECTADO, -60, 6)
+    visao.registrar_sinal(PULSEIRA, COLETOR_A, EstadoConexao.DESCONECTADO, -70, 3)   # poucas amostras
+    visao.registrar_sinal(PULSEIRA, COLETOR_A, EstadoConexao.DESCONECTADO, -80, 12)
+    visao.registrar_sinal(PULSEIRA, COLETOR_A, EstadoConexao.NAO_ENCONTRADO, None)  # não apaga as medianas
+    visao.registrar_sinal(PULSEIRA, COLETOR_A, EstadoConexao.CONECTADO, -50)        # conexão ativa não é mediana
+
+    candidato = visao.candidatos(PULSEIRA, inicio)[COLETOR_A]
+    assert abs(candidato.rssi_suavizado - (-60 * 6 + -80 * 12) / 18) < 1e-9
+    assert candidato.amostras == 18 and candidato.primeira_em >= inicio
+
+    visao.atualizar_presenca(COLETOR_A, False)
+    assert visao.candidatos(PULSEIRA, inicio) == {}  # coletor offline não é candidato
+
+
+def test_disputa_so_abre_com_sinal_valido_de_coletor_online():
+    async def cenario():
+        coordenador, broker = montar()
+        try:
+            await entregar(coordenador, posse(None), varredura(COLETOR_A, 1, -60))  # ainda sem presença
+            await entregar(coordenador, presenca(COLETOR_A, "online", 2), varredura(COLETOR_A, 3, -60, amostras=4))
+            await entregar(coordenador, estado_rssi(COLETOR_A, 4, rssi=-60, estado="desconectado"))  # sem amostras
+            assert PULSEIRA not in coordenador._disputas
+
+            with capturar_log() as log:
+                await entregar(coordenador, varredura(COLETOR_A, 5, -60, amostras=5))
+            assert PULSEIRA in coordenador._disputas
+            assert any("Disputa aberta" in r.getMessage() and r.created for r in log)
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_disputa_concede_ao_melhor_e_a_posse_fica_quando_ele_conecta_no_prazo():
+    async def cenario():
+        coordenador, broker = montar_disputa()
+        try:
+            await entregar(coordenador, posse(None), presenca(COLETOR_A, "online", 0), presenca(COLETOR_B, "online", 0))
+            with capturar_log() as log:
+                await entregar(coordenador, varredura(COLETOR_A, 1, -70), varredura(COLETOR_B, 1, -60))
+                await aguardar(lambda: donos(broker) == [COLETOR_B])
+                await entregar(coordenador, estado_rssi(COLETOR_B, 2, rssi=-60))  # conectado
+                await aguardar(lambda: PULSEIRA not in coordenador._disputas)
+                await asyncio.sleep(coordenador.prazo_conexao * 1.5)
+
+            assert donos(broker) == [COLETOR_B]
+            assert coordenador._ultimo_ativo[PULSEIRA] == COLETOR_B
+            concessao = next(r.getMessage() for r in log if "Posse concedida" in r.getMessage())
+            assert COLETOR_A in concessao and COLETOR_B in concessao  # RSSI de cada candidato
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_vencedor_que_nao_conecta_no_prazo_perde_a_posse():
+    async def cenario():
+        coordenador, broker = montar_disputa()
+        try:
+            await entregar(coordenador, posse(None), presenca(COLETOR_A, "online", 0))
+            with capturar_log() as log:
+                await entregar(coordenador, varredura(COLETOR_A, 1, -60))
+                await aguardar(lambda: donos(broker) == [COLETOR_A, None])
+            assert any("Posse liberada" in r.getMessage() and "não conectou" in r.getMessage() for r in log), log
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_vencedor_que_libera_antes_de_conectar_perde_a_posse_sem_esperar_o_prazo():
+    async def cenario():
+        coordenador, broker = montar_disputa(prazo_conexao=3600)
+        try:
+            await entregar(coordenador, posse(None), presenca(COLETOR_A, "online", 0))
+            await entregar(coordenador, varredura(COLETOR_A, 1, -60))
+            await aguardar(lambda: donos(broker) == [COLETOR_A])
+            await entregar(coordenador, liberacao(COLETOR_A, 2))  # a primeira conexão falhou
+            await aguardar(lambda: donos(broker) == [COLETOR_A, None])
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_handoff_devolve_a_posse_a_origem_se_o_vencedor_nao_conectar():
+    async def cenario():
+        coordenador, broker = montar_disputa()
+        coordenador.margem = 5
+        try:
+            await entregar(
+                coordenador, presenca(COLETOR_A, "online", 0), presenca(COLETOR_B, "online", 0), posse(COLETOR_A),
+                estado_rssi(COLETOR_A, 1, rssi=-85),  # conectado: a origem é a favorita
+            )
+            coordenador._leituras_fracas[PULSEIRA] = coordenador.minimo_fracas
+            with capturar_log() as log:
+                await coordenador._iniciar_handoff(PULSEIRA, COLETOR_A)
+                # Leitura de antes da liberação não entra na disputa (RF06)
+                await entregar(coordenador, varredura(COLETOR_A, 2, -40))
+                await entregar(coordenador, liberacao(COLETOR_A, 3), varredura(COLETOR_B, 3, -60))
+                await aguardar(lambda: donos(broker)[-1:] == [COLETOR_A] and len(donos(broker)) == 3)
+                await entregar(coordenador, estado_rssi(COLETOR_A, 4, rssi=-70))  # a origem reconecta
+                await aguardar(lambda: PULSEIRA not in coordenador._disputas)
+
+            assert donos(broker) == [None, COLETOR_B, COLETOR_A]
+            assert any("Posse devolvida à origem" in r.getMessage() for r in log), log
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_disputa_sem_sinal_se_estende_e_termina_sem_vencedor():
+    async def cenario():
+        coordenador, broker = montar_disputa(janela=0.02)
+        try:
+            await entregar(coordenador, posse(None), presenca(COLETOR_A, "online", 0))
+            with capturar_log() as log:
+                inicio = time.monotonic()
+                await coordenador._encerrar_disputa(PULSEIRA, inicio)
+            assert time.monotonic() - inicio >= coordenador.janela_disputa * coordenador.fator_extensao
+            assert not broker.posses()
+            assert any("Disputa sem vencedor" in r.getMessage() for r in log), log
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_primeiro_sinal_na_extensao_ganha_uma_janela_completa():
+    async def cenario():
+        coordenador, broker = montar_disputa(janela=0.05)
+        try:
+            await entregar(coordenador, posse(None), presenca(COLETOR_A, "online", 0))
+            tarefa = asyncio.create_task(coordenador._encerrar_disputa(PULSEIRA, time.monotonic()))
+            await asyncio.sleep(0.07)  # passou da janela sem sinal: está estendendo
+            await entregar(coordenador, varredura(COLETOR_A, 1, -60))
+            chegada = time.monotonic()
+            await aguardar(lambda: donos(broker) == [COLETOR_A])
+            assert time.monotonic() - chegada >= coordenador.janela_disputa
+            tarefa.cancel()
+            await asyncio.gather(tarefa, return_exceptions=True)
+        finally:
+            await desmontar(coordenador)
+
+    asyncio.run(cenario())
+
+
+def test_liberacao_controlada_libera_a_posse_com_log():
+    async def cenario():
+        coordenador, broker = montar()
+        try:
+            await entregar(coordenador, presenca(COLETOR_A, "online", 0), posse(COLETOR_A))
+            with capturar_log() as log:
+                await entregar(coordenador, liberacao(COLETOR_B, 1))  # não é o dono
+                assert not broker.posses()
+                await entregar(coordenador, liberacao(COLETOR_A, 2))
+            assert donos(broker) == [None]
+            assert any("Posse liberada" in r.getMessage() and COLETOR_A in r.getMessage() for r in log), log
         finally:
             await desmontar(coordenador)
 

@@ -184,6 +184,7 @@ def montar_coletor(prazo: float = 0.05) -> tuple[Coletor, BrokerFalso, dict[str,
 
     async def sessao_falsa() -> None:
         chamadas["sessoes"].append(True)
+        coletor._conectou.set()  # a pulseira conectou: o prazo de conexão (RF14) não interfere
         await esperar_para_sempre()
 
     async def desconectar_falso(reconectar: bool = False) -> None:

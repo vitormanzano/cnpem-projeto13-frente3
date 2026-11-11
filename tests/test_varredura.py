@@ -539,6 +539,56 @@ def test_coletor_com_a_posse_liberada_nao_conecta_por_melhor_que_seja_o_sinal():
     asyncio.run(cenario())
 
 
+# ------------------------------------------------------------------ prazo de conexão (RF14)
+
+def test_vencedor_que_nao_conecta_no_prazo_publica_desconectado_e_volta_a_varrer():
+    async def cenario():
+        with scanner_falso() as scanner:
+            coletor, broker, _ = montar_coletor(scanner)
+            coletor.prazo_conexao = 0.05
+
+            async def conectar_sem_resposta() -> None:
+                await asyncio.sleep(3600)  # a pulseira não responde dentro do prazo
+
+            coletor.conexao.conectar = conectar_sem_resposta
+            principal = asyncio.create_task(coletor.executar())
+            try:
+                await aguardar(lambda: scanner.ligado)
+                await coletor.ao_receber(Topicos.estado_posse(ENDERECO), posse(COLETOR))
+                await aguardar(lambda: not scanner.ligado)
+                await aguardar(lambda: scanner.ligado)  # desistiu e voltou a varrer
+
+                assert coletor._sessao is None
+                estados = broker.estados_pulseira()
+                assert {"pulseira": ENDERECO, "estado": "desconectado", "rssi": None} in estados, estados
+                # Quem libera a posse é o coordenador, que conta o mesmo prazo
+                assert not [m for _, m in broker.publicadas if m.tipo is TipoMensagem.LIBERACAO_POSSE]
+            finally:
+                await encerrar(principal)
+
+    asyncio.run(cenario())
+
+
+def test_vencedor_que_conecta_no_prazo_continua_conectado():
+    async def cenario():
+        with scanner_falso() as scanner:
+            coletor, _, _ = montar_coletor(scanner)
+            coletor.prazo_conexao = 0.05
+            principal = asyncio.create_task(coletor.executar())
+            try:
+                await aguardar(lambda: scanner.ligado)
+                await coletor.ao_receber(Topicos.estado_posse(ENDERECO), posse(COLETOR))
+                await aguardar(lambda: coletor.conexao.conectado)
+                await asyncio.sleep(coletor.prazo_conexao * 2)
+
+                assert coletor.conexao.conectado and coletor._sessao is not None
+                assert not scanner.ligado
+            finally:
+                await encerrar(principal)
+
+    asyncio.run(cenario())
+
+
 if __name__ == "__main__":
     for nome, fn in list(globals().items()):
         if nome.startswith("test_"):

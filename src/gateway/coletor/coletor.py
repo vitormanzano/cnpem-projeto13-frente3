@@ -6,7 +6,7 @@ import logging
 from bluetooth.conexao import ConexaoPulseira
 from bluetooth.domain.classificacao_conexao import ClassificacaoConexao
 from bluetooth.domain.erros import BluetoothIndisponivel, BrokerIndisponivel, FalhaConexao
-from bluetooth.domain.models import EstadoConexao
+from bluetooth.domain.models import EstadoConexao, LeituraRSSI
 from bluetooth.reconexao import ler_configuracao_reconexao, manter_conexao
 from bluetooth.scanner import VarreduraPulseira
 from mqtt.estado_rssi import EstadoRssiColetor
@@ -18,6 +18,31 @@ from mqtt.conexao import ConexaoBroker
 
 
 PRAZO_SEM_BROKER_PADRAO = 15.0
+PRAZO_CONEXAO_PADRAO    = 5.0
+
+
+def ler_prazo_conexao(prazo: float | None = None) -> float:
+    """Resolve o prazo para o coletor que recebeu a posse publicar o estado conectado (RF14).
+
+    O coordenador usa a mesma variável para liberar a posse (ou devolvê-la à origem, no handoff)
+    quando o prazo estoura, então o valor deve ser o mesmo nas máquinas dos coletores e na central.
+
+    Args:
+        prazo (float | None): Segundos. Se omitido, é lido de PRAZO_CONEXAO (padrão de 5 s).
+
+    Raises:
+        ValueError: Se o prazo não for um número maior que zero.
+    """
+    if prazo is None:
+        valor = os.getenv("PRAZO_CONEXAO") or str(PRAZO_CONEXAO_PADRAO)
+        try:
+            prazo = float(valor)
+        except ValueError as e:
+            raise ValueError(f"PRAZO_CONEXAO deve ser um número, recebido {valor!r}.") from e
+
+    if prazo <= 0:
+        raise ValueError("PRAZO_CONEXAO deve ser maior que zero.")
+    return prazo
 
 
 def ler_prazo_sem_broker(prazo: float | None = None) -> float:
@@ -59,6 +84,7 @@ class Coletor:
         broker: ConexaoBroker,
         endereco_pulseira: str,
         prazo_sem_broker: float | None = None,
+        prazo_conexao: float | None = None,
     ) -> None:
         """
         Args:
@@ -67,9 +93,11 @@ class Coletor:
             prazo_sem_broker (float | None): Segundos sem broker, com a pulseira conectada, até
                 desconectar dela para que possa ser disputada (RF11). Se omitido, é lido de
                 PRAZO_SEM_BROKER (padrão de 15 s).
+            prazo_conexao (float | None): Segundos, depois de receber a posse, para publicar o estado
+                conectado (RF14). Se omitido, é lido de PRAZO_CONEXAO (padrão de 5 s).
 
         Raises:
-            ValueError: Se a configuração da conexão, da reconexão, do prazo sem broker ou do buffer
+            ValueError: Se a configuração da conexão, da reconexão, dos prazos ou do buffer
                 de frequênci cardíaca for inválida
         """
         self.broker                                           = broker
@@ -81,7 +109,7 @@ class Coletor:
         self.varredura                                        = VarreduraPulseira(endereco_pulseira, classificacao=self._classificacao)
         self.varredura.ao_ler                                 = self.estado_rssi.registrar # Cada leitura entra na fila de publicação
         self.conexao                                          = ConexaoPulseira(endereco_pulseira, classificacao=self._classificacao)
-        self.conexao.ao_atualizar                             = self.estado_rssi.registrar # Estado e RSSI da conexão, inclusive o desconectado (RF10)
+        self.conexao.ao_atualizar                             = self._ao_atualizar_conexao # Estado e RSSI da conexão, inclusive o desconectado (RF10)
         self.conexao.ao_ler_frequencia_cardiaca               = self.frequencia.registrar  # Publicada só com a posse (RF17)
         self._varredura: asyncio.Task | None                  = None
         self._sessao: asyncio.Task | None                     = None                       # Conexão enquanto tiver a psse
@@ -90,6 +118,9 @@ class Coletor:
         self._tentativas_reconexao, self._intervalo_reconexao = ler_configuracao_reconexao()
         self.prazo_sem_broker                                 = ler_prazo_sem_broker(prazo_sem_broker)
         self._sem_broker: asyncio.Task | None                 = None                       # Espera do prazo sem broker (RF11)
+        self.prazo_conexao                                    = ler_prazo_conexao(prazo_conexao)
+        self._conectou                                        = asyncio.Event()            # A sessão atual já chegou a conectar (RF14)
+        self._esperas_conexao: set[asyncio.Task]              = set()                      # Prazo de conexão de cada sessão (RF14)
         self._soltando_sem_broker                             = False
         self.broker.adicionar_ao_desconectar(self._iniciar_prazo_sem_broker)
         self.broker.adicionar_ao_conectar(self._cancelar_prazo_sem_broker)
@@ -107,6 +138,14 @@ class Coletor:
         await self.broker.assinar(Topicos.handoff(self.endereco))
         await self.broker.assinar(Topicos.presenca_coordenador())
         await self.broker.assinar(Topicos.sinal_de_vida_coordenador(), qos=0)
+
+
+    def _ao_atualizar_conexao(self, leitura: LeituraRSSI) -> None:
+        """Callback síncrono da ConexaoPulseira: marca que a sessão conectou (prazo de conexão, RF14)
+        e enfileira a leitura para publicação."""
+        if leitura.estado is EstadoConexao.CONECTADO:
+            self._conectou.set()
+        self.estado_rssi.registrar(leitura)
 
 
     async def ao_receber(self, topico: str, mensagem: Mensagem) -> None:
@@ -132,7 +171,11 @@ class Coletor:
             if self._sessao is None or self._sessao.done():
                 logging.info(f"Posse recebida | Pulseira: {self.endereco}")
                 await self._parar_varredura()
+                self._conectou.clear()
                 self._sessao = asyncio.create_task(self._manter_sessao())
+                espera = asyncio.create_task(self._vigiar_prazo_conexao(self._sessao))
+                self._esperas_conexao.add(espera)
+                espera.add_done_callback(self._esperas_conexao.discard)
             await self.presenca.atualizar_pulseira(self.endereco)
             return
         # Antes de desconectar: leituras que ainda cheguem sairiam duplicadas com as do novo dono (RF17)
@@ -161,6 +204,31 @@ class Coletor:
             self._iniciar_varredura()
 
 
+    async def _vigiar_prazo_conexao(self, sessao: asyncio.Task) -> None:
+        """O coletor que recebeu a posse tem `prazo_conexao` para publicar o estado conectado (RF14).
+
+        Estourado o prazo, desiste: desconecta, publica o estado desconectado e volta à varredura.
+        A liberação não é publicada: quem libera a posse (ou a devolve à origem, no handoff) é o
+        coordenador, que conta o mesmo prazo.
+        """
+        try:
+            await asyncio.wait_for(self._conectou.wait(), self.prazo_conexao)
+            return
+        except TimeoutError:
+            pass
+        if self._sessao is not sessao:
+            return # A sessão já acabou por outro caminho (posse perdida, falha na conexão)
+
+        logging.warning(
+            f"Prazo de conexão esgotado | Pulseira: {self.endereco} | Não conectou em "
+            f"{self.prazo_conexao:g}s; voltando à varredura"
+        )
+        await self._desconectar()
+        await self.estado_rssi.publicar_pendentes()
+        await self.presenca.atualizar_pulseira(None)
+        self._iniciar_varredura()
+
+
     async def _liberar(self, motivo: str, handoff: str | None = None) -> None:
         """Desconecta, publica o estado desconectado e só depois a liberação: o coordenador
         não pode conceder a posse a outro coletor enquanto este ainda estiver conectado.
@@ -186,14 +254,36 @@ class Coletor:
         sessao = self._sessao
         if sessao is None:
             return
-        try:
-            await self.conexao.desconectar()
-        except FalhaConexao as e:
-            logging.error(f"Pulseira: {self.endereco} | {e}")
-        sessao.cancel()
-        await asyncio.gather(sessao, return_exceptions=True)
+        if not self._conectou.is_set():
+            await self._cancelar_conexao(sessao)
+        else:
+            try:
+                await self.conexao.desconectar()
+            except FalhaConexao as e:
+                logging.error(f"Pulseira: {self.endereco} | {e}")
+            sessao.cancel()
+            await asyncio.gather(sessao, return_exceptions=True)
         if self._sessao is sessao:
             self._sessao = None
+
+
+    async def _cancelar_conexao(self, sessao: asyncio.Task) -> None:
+        """Interrompe a sessão que ainda não conectou e anuncia o estado desconectado (RF14).
+
+        A tarefa é cancelada antes de qualquer desconexão: desconectar no meio do connect() do bleak
+        não é seguro. Se a conexão completou bem no limite, ela é desfeita depois do cancelamento.
+        """
+        sessao.cancel()
+        await asyncio.gather(sessao, return_exceptions=True)
+        if self.conexao.conectado:
+            try:
+                await self.conexao.desconectar()
+            except FalhaConexao as e:
+                logging.error(f"Pulseira: {self.endereco} | {e}")
+            return # A desconexão já publicou o desconectado
+        # Sem conexão não há mudança de estado da ConexaoPulseira que publique o desconectado
+        self._classificacao.mudar(EstadoConexao.DESCONECTADO)
+        self.estado_rssi.registrar(LeituraRSSI(self.endereco, EstadoConexao.DESCONECTADO))
 
 
     def _iniciar_prazo_sem_broker(self) -> None:
@@ -283,6 +373,10 @@ class Coletor:
             await asyncio.wait(tarefas, return_when=asyncio.FIRST_EXCEPTION)
         finally:
             await self._parar_varredura()
+            esperas = list(self._esperas_conexao)
+            for espera in esperas:
+                espera.cancel()
+            await asyncio.gather(*esperas, return_exceptions=True)
             if self._sem_broker is not None:
                 self._sem_broker.cancel()
                 await asyncio.gather(self._sem_broker, return_exceptions=True)

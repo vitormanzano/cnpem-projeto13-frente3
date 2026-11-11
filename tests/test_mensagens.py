@@ -339,7 +339,7 @@ def test_handoff_do_coordenador_tem_id_que_aparece_no_log_ate_a_disputa():
     async def cenario():
         broker = BrokerFalso(COORDENADOR)
         coordenador = Coordenador(broker, pulseiras=[PULSEIRA])
-        coordenador.janela_handoff = 3600  # a disputa não termina durante o teste
+        coordenador.janela_disputa = 3600  # a disputa não termina durante o teste
         coordenador.visao.atualizar_posse(PULSEIRA, COLETOR)
         coordenador._leituras_fracas[PULSEIRA] = coordenador.minimo_fracas
         try:

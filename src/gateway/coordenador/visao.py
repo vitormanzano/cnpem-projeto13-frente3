@@ -7,8 +7,26 @@ from statistics import fmean
 from bluetooth.domain.models import EstadoConexao
 
 
-TAMANHO_JANELA_PADRAO = 5
-VALIDADE_SINAL_PADRAO = 3.0
+MINIMO_AMOSTRAS_PADRAO = 5  # Talvez precise de ajuste (medir a quantidade de anúncios que chega)
+# Medianas guardadas por coletor: precisam cobrir a disputa mais longa, a janela estendida
+# (janela x fator) mais a janela completa a partir do primeiro sinal (3 s x 3 + 3 s com os padrões)
+MEDIANAS_GUARDADAS = 60
+
+
+@dataclass(frozen=True)
+class Mediana:
+    """Mediana de RSSI publicada pela varredura de um coletor (RF18)."""
+    rssi: int
+    amostras: int       # Anúncios que compõem a mediana
+    recebida_em: float  # time.monotonic() da chegada ao coordenador
+
+
+@dataclass(frozen=True)
+class Candidato:
+    """Resumo dos sinais válidos de um coletor numa janela de disputa (RF14)."""
+    rssi_suavizado: float  # Média das medianas válidas, ponderada pelas amostras de cada uma
+    amostras: int          # Soma das amostras das medianas válidas
+    primeira_em: float     # Chegada da primeira mediana válida na janela, para o desempate
 
 
 @dataclass
@@ -16,50 +34,27 @@ class SinalColetor:
     """O que o coordenador sabe do sinal de um coletor para uma pulseira"""
     estado: EstadoConexao
     recebido_em: float
-    amostras: deque[tuple[int, int]] # (Mediana, quantidade de anúncios)
-
-
-    @property
-    def rssi(self) -> int | None:
-        """Último RSSI recebido."""
-        return self.amostras[-1][0] if self.amostras else None
-
-
-    @property
-    def rssi_suavizada(self) -> float | None:
-        """Média das medianas, ponderada pela qunatidade de anúncios de cada uma."""
-        if not self.amostras:
-            return None
-        medianas, quantidade = zip(*self.amostras)
-        return fmean(medianas, weights=quantidade)
-
-     
-    @property
-    def total_amostras(self) -> int:
-        return sum(n for _, n in self.amostras)
+    rssi: int | None          # Último RSSI recebido; None em nao-encontrado
+    medianas: deque[Mediana]  # Só as da varredura: a conexão ativa não publica mediana
 
 
     def __str__(self) -> str:
         rssi = "-" if self.rssi is None else f"{self.rssi} dBm"
-        media = "-" if self.rssi_suavizada is None else f"{self.rssi_suavizada:.1f} dBm"
         idade = time.monotonic() - self.recebido_em
-        return (
-            f"{self.estado.value:<14} | rssi: {rssi:>8} | média: {media:>10} | "
-            f"há {idade:4.1f}s | amostras: {list(self.amostras)}"
-        )
+        ultimas = [(m.rssi, m.amostras) for m in list(self.medianas)[-5:]]
+        return f"{self.estado.value:<14} | rssi: {rssi:>8} | há {idade:4.1f}s | medianas (rssi, amostras): {ultimas}"
 
 
 class VisaoColetores:
     """Estado da rede montado a partir das mensagens do broker: quem está disponível,
     quem enxerga cada pulseira (e com que sinal) e quem tem a posse (RF13)."""
 
-    def __init__(
-        self,
-        tamanho_janela: int = TAMANHO_JANELA_PADRAO,
-        validade: float = VALIDADE_SINAL_PADRAO,
-    ) -> None:
-        self.tamanho_janela = tamanho_janela
-        self.validade = validade
+    def __init__(self, minimo_amostras: int = MINIMO_AMOSTRAS_PADRAO) -> None:
+        """
+        Args:
+            minimo_amostras (int): Anúncios que uma mediana precisa ter para o sinal ser válido (RF14).
+        """
+        self.minimo_amostras = minimo_amostras
         self.coletores_online: set[str] = set()
         self.coletores_offline: set[str] = set() # Anunciaram offline
         self.coletores_sem_sinal: set[str] = set() # Online, mas sem mensagem há mais que o prazo
@@ -178,22 +173,35 @@ class VisaoColetores:
             self.ultima_mensagem[coletor] = agora
 
 
-    def registrar_sinal(self, pulseira: str, coletor: str, estado: EstadoConexao, rssi: int | None, amostras: int = 1) -> SinalColetor:
+    def registrar_sinal(
+        self, pulseira: str, coletor: str, estado: EstadoConexao, rssi: int | None, amostras: int | None = None,
+    ) -> SinalColetor:
+        """Registra uma leitura de estado/RSSI do coletor.
+
+        Args:
+            amostras (int | None): Anúncios da mediana, só na varredura (RF18). None na conexão ativa,
+                cuja leitura atualiza o último RSSI mas não é mediana.
+        """
         agora = time.monotonic()
         sinais = self.sinais.setdefault(pulseira, {})
         sinal = sinais.get(coletor)
         if sinal is None:
-            sinal = SinalColetor(estado, agora, deque(maxlen=self.tamanho_janela))
+            sinal = SinalColetor(estado, agora, None, deque(maxlen=MEDIANAS_GUARDADAS))
             sinais[coletor] = sinal
 
-        sinal.estado = estado
-        sinal.recebido_em = agora
-        if rssi is None:
-            """Significa nao-encontrado, as amostras anteriores não representam mais o sinal"""
-            sinal.amostras.clear()
-        else:
-            sinal.amostras.append((rssi, amostras))
+        sinal.estado, sinal.recebido_em, sinal.rssi = estado, agora, rssi
+        # Um nao-encontrado não apaga as medianas: as publicadas na janela continuam valendo (RF14)
+        if rssi is not None and amostras is not None:
+            sinal.medianas.append(Mediana(rssi, amostras, agora))
         return sinal
+
+
+    def sinal_valido(self, coletor: str, rssi: int | None, amostras: int | None) -> bool:
+        """Uma leitura é sinal válido se vem de coletor disponível e é uma mediana com o mínimo de amostras (RF14)."""
+        return (
+            rssi is not None and amostras is not None and amostras >= self.minimo_amostras
+            and self.disponivel(coletor)
+        )
 
 
     def atualizar_posse(self, pulseira: str, coletor: str | None) -> None:
@@ -205,37 +213,46 @@ class VisaoColetores:
         return [pulseira for pulseira, dono in self.posse.items() if dono == coletor]
 
 
-    def sinais_validos(self, pulseira) -> dict[str, SinalColetor]:
-        """Sinais recentes, de coletores disponíveis, que de fato enxergam a pulseira.
+    def candidatos(self, pulseira: str, desde: float) -> dict[str, Candidato]:
+        """Coletores com sinal válido na janela de disputa iniciada em `desde` (RF14).
 
-        O filtro é feito na leitura, e não no registro, porque o MQTT só garante ordem
-        dentro de um mesmo tópico: O RSSI de um coletor pode chegar antes da presença dele.
+        Só contam as medianas com o mínimo de amostras que chegaram a partir de `desde`, de
+        coletores disponíveis no momento da consulta. O filtro de disponibilidade é feito aqui, e
+        não no registro, porque o MQTT só garante ordem dentro de um mesmo tópico: o RSSI de um
+        coletor pode chegar antes da presença dele.
+
+        Args:
+            desde (float): time.monotonic() do início da janela (inclusive).
+
+        Returns:
+            dict[str, Candidato]: Por coletor; quem não tem mediana válida na janela fica de fora.
         """
-        agora = time.monotonic()
         resultado = {}
         for coletor, sinal in self.sinais.get(pulseira, {}).items():
-            if (self.disponivel(coletor)
-                and agora - sinal.recebido_em <= self.validade
-                and sinal.rssi is not None
-            ):
-                resultado[coletor] = sinal
+            if not self.disponivel(coletor):
+                continue
+            validas = [
+                m for m in sinal.medianas
+                if m.recebida_em >= desde and m.amostras >= self.minimo_amostras
+            ]
+            if not validas:
+                continue
+            resultado[coletor] = Candidato(
+                rssi_suavizado=fmean([m.rssi for m in validas], weights=[m.amostras for m in validas]),
+                amostras=sum(m.amostras for m in validas),
+                primeira_em=validas[0].recebida_em,
+            )
         return resultado
-
-
-    def limpar_amostras(self, pulseira: str) -> None:
-        """A disputa de um handoff só deve comparar leituras feitas depois da liberação."""
-        for sinal in self.sinais.get(pulseira, {}).values():
-            sinal.amostras.clear()
 
 
     def __str__(self) -> str:
         """Retrato da visão do coordenador, em várias linhas, para o log.
 
-        Legenda: `*` = coletor com a posse; `[indisponivel]` = coletor offline ou sem sinal de vida;
-        `[expirado]` = leitura mais velha que `validade`. Sinais marcados não entram em disputa.
+        Legenda: `*` = coletor com a posse; `[indisponivel]` = coletor offline ou sem sinal de vida,
+        que não entra em disputa.
         """
         online = ", ".join(sorted(self.coletores_online)) or "nenhum"
-        linhas = [f"Visão dos coletores | online: [{online}] | janela: {self.tamanho_janela} | validade: {self.validade:g}s"]
+        linhas = [f"Visão dos coletores | online: [{online}] | mínimo de amostras: {self.minimo_amostras}"]
 
         agora = time.monotonic()
         coletores = sorted(self.coletores_online | self.coletores_offline | self.ultima_mensagem.keys())
@@ -267,11 +284,7 @@ class VisaoColetores:
                 linhas.append("      (sem sinais)")
             for coletor, sinal in sorted(sinais.items()):
                 marca = "*" if coletor == dono else " "
-                avisos = []
-                if not self.disponivel(coletor):
-                    avisos.append("[indisponivel]")
-                if agora - sinal.recebido_em > self.validade:
-                    avisos.append("[expirado]")
-                linhas.append(f"    {marca} {coletor:<20} {sinal} {' '.join(avisos)}".rstrip())
+                aviso = "" if self.disponivel(coletor) else " [indisponivel]"
+                linhas.append(f"    {marca} {coletor:<20} {sinal}{aviso}")
 
         return "\n".join(linhas)
