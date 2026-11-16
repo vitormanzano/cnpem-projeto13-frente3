@@ -1,7 +1,7 @@
 class Topicos:
     @staticmethod
     def presenca_coletor(coletor: str) -> str:
-        """Coletor: Presença e sinal de vida"""
+        """Coletor: Presença (RF12)"""
         return f"coletores/{coletor}/presenca"
 
 
@@ -10,6 +10,21 @@ class Topicos:
         """Devolve o coletor de coletores/{coletor}/presenca, ou None se o tópico for outro."""
         partes = topico.split("/")
         if len(partes) == 3 and partes[0] == "coletores" and partes[2] == "presenca":
+            return partes[1]
+        return None
+
+
+    @staticmethod
+    def sinal_de_vida_coletor(coletor: str) -> str:
+        """Coletor: Sinal de vida, sem retenção (RF12)"""
+        return f"coletores/{coletor}/sinal-de-vida"
+
+
+    @staticmethod
+    def extrair_sinal_de_vida_coletor(topico: str) -> str | None:
+        """Devolve o coletor de coletores/{coletor}/sinal-de-vida, ou None se o tópico for outro."""
+        partes = topico.split("/")
+        if len(partes) == 3 and partes[0] == "coletores" and partes[2] == "sinal-de-vida":
             return partes[1]
         return None
 
@@ -51,6 +66,15 @@ class Topicos:
 
 
     @staticmethod
+    def extrair_frequencia_cardiaca(topico: str) -> str | None:
+        """Devolve a pulseira de pulseiras/{pulseira}/frequencia-cardiaca, ou None se o tópico for outro."""
+        partes = topico.split("/")
+        if len(partes) == 3 and partes[0] == "pulseiras" and partes[2] == "frequencia-cardiaca":
+            return partes[1]
+        return None
+
+
+    @staticmethod
     def estado_posse(pulseira: str) -> str:
         """Coordenador: Coletor responsável ou posse liberada"""
         return f"pulseiras/{pulseira}/posse"
@@ -70,10 +94,26 @@ class Topicos:
         """Coordenador: Comando de handoff para a origem liberar a pulseira."""
         return f"pulseiras/{pulseira}/handoff"
 
+
+    @staticmethod
+    def extrair_handoff(topico: str) -> str | None:
+        """Devolve a pulseira de pulseiras/{pulseira}/handoff, ou None se o tópico for outro."""
+        partes = topico.split("/")
+        if len(partes) == 3 and partes[0] == "pulseiras" and partes[2] == "handoff":
+            return partes[1]
+        return None
+
+
     @staticmethod
     def presenca_coordenador() -> str:
-        """Coordenador: Presença e sinal de vida.
+        """Coordenador: Presença (RF19).
 
         OBS: Esse método não tem nenhum ID pois, no momento atual, existe apenas 1 coordenador.
         """
         return "coordenador/presenca"
+
+
+    @staticmethod
+    def sinal_de_vida_coordenador() -> str:
+        """Coordenador: Sinal de vida, sem retenção (RF19)"""
+        return "coordenador/sinal-de-vida"

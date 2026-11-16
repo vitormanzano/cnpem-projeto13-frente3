@@ -7,7 +7,7 @@ import socket
 import time
 from collections.abc import Callable
 from dataclasses import fields
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
@@ -17,7 +17,9 @@ from bluetooth.domain.erros import (
 )
 from bluetooth.domain.models import EstadoConexao, LeituraFrequenciaCardiaca, LeituraRSSI
 from bluetooth.reconexao import manter_conexao
-from bluetooth.scanner import VarreduraPulseira, find_all_local_devices
+from bluetooth.scanner import (
+    VarreduraPulseira, find_all_local_devices, ler_duracao_varredura, ler_endereco_pulseira, localizar_pulseira,
+)
 from coletor.coletor import identificador_coletor
 from mqtt.conexao import ConexaoBroker
 from mqtt.domain.models import CONFIG_POR_TIPO, VERSAO_FORMATO, EstadoPresenca, Mensagem, TipoMensagem
@@ -126,6 +128,43 @@ async def espiar(*topicos: str) -> None:
 
 # ------------------------------------------------------------------ BLE
 
+async def teste_rf01(duracao: float | None = None) -> None:
+    """RF01 - Listar os dispositivos BLE anunciando ao alcance, com endereço, nome e RSSI.
+
+    Com TARGET_ADDRESS definido, confere se a pulseira apareceu (ligada e sem conexão com outro aparelho).
+    Para a mensagem de Bluetooth desligado, rode antes `bluetoothctl power off`.
+    """
+    dispositivos = await find_all_local_devices(duracao)
+    if not dispositivos:
+        print("Nenhum dispositivo BLE encontrado. Confira se há dispositivos ligados e anunciando ao alcance do coeltor.")
+        return
+
+    print(f"{'Endereco':<17} {'RSSI':>8} Nome")
+    for dispositivo in dispositivos:
+        print(f"{dispositivo.endereco:<17} {dispositivo.rssi:>4} dBm {dispositivo.nome}")
+
+    enderecos = [dispositivo.endereco.upper() for dispositivo in dispositivos]
+    _verificar("cada dispositivo aparece uma única vez", len(enderecos) == len(set(enderecos)))
+    if alvo := os.getenv("TARGET_ADDRESS"):
+        _verificar(f"pulseira {alvo} na lista", alvo.upper() in enderecos)
+
+
+async def teste_rf02() -> None:
+    """RF02 - Localizar a pulseira: para no primeiro anúncio; endereço inexistente gera nao-encontrado."""
+    endereco = ler_endereco_pulseira(_config("TARGET_ADDRESS"))
+    limite = ler_duracao_varredura()
+    inicio = time.monotonic()
+    pulseira = await localizar_pulseira(endereco)
+    duracao = time.monotonic() - inicio
+    logging.info(f"Pulseira: {pulseira.endereco} | Nome: {pulseira.nome} | RSSI: {pulseira.rssi} dBm")
+    _verificar(f"parou no primeiro anúncio ({duracao:.1f}s, limite {limite:g}s)", duracao < limite)
+    try:
+        await localizar_pulseira(ENDERECO_INEXISTENTE, timeout=5)
+        _verificar("endereço inexistente gera pulseira-nao-encontrada", False)
+    except PulseiraNaoEncontrada as e:
+        _verificar(f"endereço inexistente gera {e.codigo}", True)
+
+
 async def teste_rf03() -> None:
     """RF03 - Conectar à pulseira: conecta, consulta estado e serviços, libera e testa a falha com endereço inexistente."""
     conexao = ConexaoPulseira(_config("TARGET_ADDRESS"))
@@ -161,32 +200,46 @@ async def teste_rf07() -> None:
         servicos = conexao.servicos
         for servico in servicos:
             logging.info(f"Serviço {servico.uuid} | {servico.descricao}")
-        _verificar("todo serviço tem UUID e descrição", all(s.uuid and s.descricao for s in servicos))
-        _verificar("serviço de frequência cardíaca (0x180D) na lista",
-                   any(s.uuid.lower() == UUID_SERVICO_FC for s in servicos))
+        sem_descricao = [s.uuid for s in servicos if s.descricao == "Unknown"]
+        _verificar(f"todo serviço tem UUID e descrição (sem descrição: {sem_descricao or 'nenhum'})",
+            all(s.uuid for s in servicos) and not sem_descricao)
 
 
 async def teste_rf04(duracao: float = 30) -> None:
-    """RF04 - Ler RSSI por `duracao` s junto com a frequência cardíaca. O intervalo vem de RSSI_INTERVALO."""
+    """RF04 - Ler RSSI por `duracao` s junto com a frequência cardíaca. O intervalo vem de RSSI_INTERVALO.
+
+    Sem btmgmt ou sem root, o monitor deve parar com rssi-indisponivel e o motivo. As falhas seguidas
+    que derrubam a conexão (RSSI_MAX_FALHAS) estão em tests/test_rssi.py e tests/test_reconexao.py.
+    """
+    lidas: list[LeituraRSSI] = []
+
+    def ao_ler(leitura: LeituraRSSI) -> None:
+        lidas.append(leitura)
+        logging.info(f"RSSI: {leitura.rssi} dBm | Horário: {leitura.timestamp:%H:%M:%S.%f}")
+
     async with ConexaoPulseira(_config("TARGET_ADDRESS")) as conexao:
+        conexao.ao_ler = ao_ler
         fc_ativa = await _tentar_assinar_fc(conexao)
+        inicio = datetime.now(timezone.utc)
         monitor = asyncio.create_task(conexao.monitorar_rssi())
         await asyncio.wait({monitor}, timeout=duracao)
         parou_sozinho = monitor.done()
         await _encerrar(monitor)
 
-        leituras = conexao.registros_rssi
         _verificar("monitor rodou até o fim (não parou sozinho)", not parou_sozinho)
-        _verificar("leituras com RSSI em dBm e horário", bool(leituras) and all(leitura.rssi is not None for leitura in leituras))
-        if len(leituras) >= 2:
-            passos = [(b.timestamp - a.timestamp).total_seconds() for a, b in zip(leituras, leituras[1:])]
-            logging.info(
-                f"Intervalo medido: {sum(passos) / len(passos):.2f}s "
-                f"(configurado: {os.getenv('RSSI_INTERVALO', '1')}s)"
-            )
+        _verificar(f"leituras com RSSI em dBm e horário ({len(lidas)})",
+                   bool(lidas) and all(leitura.rssi is not None for leitura in lidas))
+        _verificar("RSSI mais recente consultável", bool(lidas) and conexao.rssi_atual is lidas[-1])
+        if len(lidas) >= 2:
+            passos = [(b.timestamp - a.timestamp).total_seconds() for a, b in zip(lidas, lidas[1:])]
+            media = sum(passos) / len(passos)
+            _verificar(f"intervalo medido {media:.2f}s (configurado: {conexao.intervalo_rssi:g}s)",
+                       abs(media - conexao.intervalo_rssi) <= max(0.1, 0.2 * conexao.intervalo_rssi))
         _verificar("conexão continua ativa depois das leituras", conexao.conectado)
         if fc_ativa:
-            _verificar("frequência cardíaca continuou chegando", bool(conexao.registros_frequencia))
+            registros_fc = conexao.registros_frequencia
+            _verificar("frequência cardíaca continuou chegando durante as leituras",
+                       bool(registros_fc) and registros_fc[-1].timestamp > inicio)
 
 
 async def teste_rf16(duracao: float = 30) -> None:
@@ -206,6 +259,7 @@ async def teste_rf16(duracao: float = 30) -> None:
         )
 
         monitor = asyncio.create_task(conexao.monitorar_rssi())
+        vigilancia = asyncio.create_task(conexao.manter_vigilancia_frequencia_cardiaca())
         ultima = None
         recebidas = 0
         limite = time.monotonic() + duracao
@@ -216,7 +270,7 @@ async def teste_rf16(duracao: float = 30) -> None:
                 ultima = registros[-1]
                 recebidas += 1
                 logging.info(f"FC {ultima.bpm} bpm às {ultima.timestamp:%H:%M:%S.%f}")
-        await _encerrar(monitor)
+        await _encerrar(monitor, vigilancia)
         if conexao.conectado:
             await conexao.parar_leitura_frequencia_cardiaca()
 
@@ -266,7 +320,7 @@ async def teste_rf10(conectada_por: float = 10) -> None:
 
     Para "o encerramento do coletor libera a conexão", aperte Ctrl+C enquanto estiver conectada:
     deve aparecer "Desconectando da pulseira" no log.
-    O estado desconectado publicado no broker é conferido no teste_rf09.
+    Estado desconectado publicado, liberação da posse e ordem do encerramento estão em tests/test_desconexao.py.
     """
     endereco = _config("TARGET_ADDRESS")
     conexao = ConexaoPulseira(endereco)
@@ -285,8 +339,8 @@ async def teste_rf10(conectada_por: float = 10) -> None:
     await asyncio.sleep(2)  # tempo para a pulseira voltar a anunciar
     try:
         leitura = await _primeira_leitura(endereco)
-        _verificar("pulseira voltou a aparecer na varredura", 
-                   leitura is not None and leitura.estado is EstadoConexao.NAO_ENCONTRADO)
+        _verificar("pulseira voltou a aparecer na varredura",
+                   leitura is not None and leitura.estado is EstadoConexao.DESCONECTADO)
     except PulseiraNaoEncontrada:
         _verificar("pulseira voltou a aparecer na varredura", False)
 
@@ -346,9 +400,10 @@ async def teste_rf11(manual: bool = False) -> None:
                 continue
             numero += 1
             try:
+                # sinal-de-vida porque não tem campo obrigatório: o "eco" extra passa no de_json
                 await conexao.publicar(
                     topico_eco,
-                    Mensagem(tipo=TipoMensagem.ESTADO_PULSEIRA, origem=cliente_id, conteudo={"eco": numero}),
+                    Mensagem(tipo=TipoMensagem.SINAL_DE_VIDA, origem=cliente_id, conteudo={"eco": numero}),
                 )
             except BrokerIndisponivel as e:
                 logging.warning(f"Eco {numero} não publicado: {e}")
@@ -373,20 +428,26 @@ async def teste_rf11(manual: bool = False) -> None:
 
 
 async def teste_rf12(simular_queda: bool = True) -> None:
-    """RF12 - Presença do coletor, conferida por um espião em coletores/{coletor}/presenca.
+    """RF12 - Presença do coletor, conferida por um espião em coletores/{coletor}/presenca e /sinal-de-vida.
 
-    Cobre: online retido ao conectar, sinal de vida, pulseira atendida, last will na queda (simulada
-    cortando o TCP), offline no encerramento e nada publicado depois dele.
+    Cobre: online retido ao conectar, sinal de vida em tópico próprio, pulseira atendida, last will na
+    queda (simulada cortando o TCP), offline no encerramento e nada publicado depois dele.
     """
     cliente_id = identificador_coletor()
     recebidas: list[Mensagem] = []
-    espiao = await _espiao(Topicos.presenca_coletor(cliente_id), recebidas=recebidas)
+    espiao = await _espiao(
+        Topicos.presenca_coletor(cliente_id), Topicos.sinal_de_vida_coletor(cliente_id), recebidas=recebidas,
+    )
     conexao = ConexaoBroker(cliente_id=cliente_id)
     presenca = PresencaColetor(conexao)  # antes de conectar: registra a última vontade
     intervalo = presenca.intervalo
 
+    def do_tipo(tipo: TipoMensagem) -> list[Mensagem]:
+        return [mensagem for mensagem in recebidas if mensagem.tipo is tipo]
+
     def ultimo(campo: str) -> str | None:
-        return recebidas[-1].conteudo.get(campo) if recebidas else None
+        presencas = do_tipo(TipoMensagem.PRESENCA)
+        return presencas[-1].conteudo.get(campo) if presencas else None
 
     tarefas = [asyncio.create_task(espiao.manter_conexao())]
     try:
@@ -402,14 +463,16 @@ async def teste_rf12(simular_queda: bool = True) -> None:
         ]
         _verificar("online ao conectar",
                    await _aguardar(lambda: ultimo("estado") == EstadoPresenca.ONLINE.value, timeout=15))
-        antes = len(recebidas)
+        antes = len(do_tipo(TipoMensagem.SINAL_DE_VIDA))
         await asyncio.sleep(intervalo * 2 + 1)
-        _verificar(f"sinal de vida a cada {intervalo:g}s", len(recebidas) - antes >= 2)
-        mensagem = recebidas[-1]
+        sinais = do_tipo(TipoMensagem.SINAL_DE_VIDA)
+        _verificar(f"sinal de vida a cada {intervalo:g}s, em tópico próprio", len(sinais) - antes >= 2)
+        _verificar("sinal de vida sem campos", bool(sinais) and sinais[-1].conteudo == {})
+        mensagem = do_tipo(TipoMensagem.PRESENCA)[-1]
         _verificar("mensagem tem coletor, estado, pulseira e timestamp",
                    mensagem.origem == cliente_id and {"estado", "pulseira"} <= mensagem.conteudo.keys())
 
-        await presenca.atualiar_pulseira(PULSEIRA_FICTICIA)
+        await presenca.atualizar_pulseira(PULSEIRA_FICTICIA)
         _verificar("troca de pulseira publicada na hora",
                    await _aguardar(lambda: ultimo("pulseira") == PULSEIRA_FICTICIA, timeout=2))
 
@@ -435,6 +498,7 @@ async def teste_rf15() -> None:
     """RF15 - Formato, tópicos e QoS padronizados. Não usa BLE nem broker."""
     tabela = {  # tipo: (QoS, retida), conforme a tabela do RF15
         TipoMensagem.PRESENCA:            (1, True),
+        TipoMensagem.SINAL_DE_VIDA:       (0, False),
         TipoMensagem.ESTADO_PULSEIRA:     (0, False),
         TipoMensagem.LIBERACAO_POSSE:     (1, False),
         TipoMensagem.FREQUENCIA_CARDIACA: (0, False),
@@ -457,20 +521,24 @@ async def teste_rf15() -> None:
     _verificar("timestamp em UTC", datetime.fromisoformat(dados["timestamp"]).utcoffset() == timedelta(0))
     _verificar("ida e volta preserva a mensagem", Mensagem.de_json(original.para_json()) == original)
 
-    logging.info("Os 3 avisos 'Mensagem descartada' a seguir são esperados")
+    logging.info("Os 4 avisos 'Mensagem descartada' a seguir são esperados")
     _verificar("versão incompatível é descartada",
                Mensagem.de_json(json.dumps({**dados, "versao": VERSAO_FORMATO + 1})) is None)
     _verificar("JSON inválido é descartado", Mensagem.de_json("{não é json") is None)
     _verificar("campo obrigatório ausente é descartado", Mensagem.de_json(json.dumps({"versao": VERSAO_FORMATO})) is None)
+    _verificar("conteudo sem os campos do tipo é descartado",
+               Mensagem.de_json(json.dumps({**dados, "tipo": "handoff", "conteudo": {"pulseira": "AA"}})) is None)
 
     hierarquia = [
-        (Topicos.presenca_coletor("c1"),      "coletores/c1/presenca"),
-        (Topicos.estado_rssi("c1", "AA"),     "coletores/c1/pulseiras/AA"),
-        (Topicos.liberacao_posse("AA"),       "pulseiras/AA/liberacao"),
-        (Topicos.frequencia_cardiaca("AA"),   "pulseiras/AA/frequencia-cardiaca"),
-        (Topicos.estado_posse("AA"),          "pulseiras/AA/posse"),
-        (Topicos.handoff("AA"),               "pulseiras/AA/handoff"),
-        (Topicos.presenca_coordenador(),      "coordenador/presenca"),
+        (Topicos.presenca_coletor("c1"),          "coletores/c1/presenca"),
+        (Topicos.sinal_de_vida_coletor("c1"),     "coletores/c1/sinal-de-vida"),
+        (Topicos.estado_rssi("c1", "AA"),         "coletores/c1/pulseiras/AA"),
+        (Topicos.liberacao_posse("AA"),           "pulseiras/AA/liberacao"),
+        (Topicos.frequencia_cardiaca("AA"),       "pulseiras/AA/frequencia-cardiaca"),
+        (Topicos.estado_posse("AA"),              "pulseiras/AA/posse"),
+        (Topicos.handoff("AA"),                   "pulseiras/AA/handoff"),
+        (Topicos.presenca_coordenador(),          "coordenador/presenca"),
+        (Topicos.sinal_de_vida_coordenador(),     "coordenador/sinal-de-vida"),
     ]
     for gerado, documentado in hierarquia:
         _verificar(f"tópico {documentado}", gerado == documentado)
@@ -478,6 +546,7 @@ async def teste_rf15() -> None:
     _verificar("extrai coletor e pulseira do estado/RSSI",
                Topicos.extrair_estado_rssi("coletores/c1/pulseiras/AA") == ("c1", "AA"))
     _verificar("extrai a pulseira da posse", Topicos.extrair_estado_posse("pulseiras/AA/posse") == "AA")
+    _verificar("extrai a pulseira do handoff", Topicos.extrair_handoff("pulseiras/AA/handoff") == "AA")
     _verificar("tópico de outro tipo não é extraído", Topicos.extrair_estado_rssi("coletores/c1/presenca") is None)
     _verificar("estados na linguagem ubíqua",
                {e.value for e in EstadoConexao} == {"conectado", "desconectado", "conexao-fraca", "nao-encontrado"})
@@ -539,14 +608,64 @@ async def teste_rf09(duracao: float = 60) -> None:
                    recebidas[-1].conteudo.get("estado") == EstadoConexao.DESCONECTADO.value)
 
 
+async def teste_rf17(duracao: float = 60) -> None:
+    """RF17 - Publicar a frequência cardíaca no broker, conferida por um espião em pulseiras/+/frequencia-cardiaca.
+
+    Sem coordenador, a posse é simulada: concedida na conexão ao broker e reconfirmada a cada reconexão,
+    como faria a posse retida. Durante o teste, `docker stop cnpem_hivemq` por menos de
+    FC_MAX_LEITURAS_SEM_BROKER segundos e `docker start cnpem_hivemq`: o log da FC não para e, na volta,
+    aparece "Publicando N leitura(s) ... guardada(s)". O espião também cai e pode reconectar depois do
+    coletor, perdendo parte das guardadas; o que ele receber deve continuar em ordem e sem repetição.
+    """
+    from mqtt.frequencia_cardiaca import FrequenciaCardiacaColetor
+
+    cliente_id = identificador_coletor()
+    endereco = _config("TARGET_ADDRESS")
+    recebidas: list[Mensagem] = []
+    espiao = await _espiao(Topicos.frequencia_cardiaca("+"), recebidas=recebidas)
+    conexao_broker = ConexaoBroker(cliente_id=cliente_id)
+    frequencia = FrequenciaCardiacaColetor(conexao_broker, endereco)
+    conexao_broker.adicionar_ao_conectar(frequencia.receber_posse)  # Faz o papel da posse retida do coordenador
+    pulseira = ConexaoPulseira(endereco)
+    pulseira.ao_ler_frequencia_cardiaca = frequencia.registrar
+
+    tarefas = [
+        asyncio.create_task(espiao.manter_conexao()),
+        asyncio.create_task(conexao_broker.manter_conexao()),
+        asyncio.create_task(frequencia.manter_publicacao()),
+    ]
+    try:
+        await pulseira.conectar()
+        await pulseira.iniciar_leitura_frequencia_cardiaca()
+        await asyncio.sleep(duracao)
+        frequencia.perder_posse()
+        antes = len(recebidas)
+        await asyncio.sleep(3)  # A pulseira segue conectada e notificando, mas sem a posse
+        sem_posse_nao_publica = len(recebidas) == antes
+    finally:
+        await pulseira.desconectar()
+        await _encerrar(*tarefas)
+
+    if _verificar("espião recebeu frequência cardíaca", bool(recebidas)):
+        primeira = recebidas[0]
+        _verificar("mensagem tem pulseira, coletor e bpm",
+                   primeira.conteudo.get("pulseira") == endereco and primeira.conteudo.get("coletor") == cliente_id
+                   and isinstance(primeira.conteudo.get("bpm"), int))
+        _verificar("timestamps em ordem e sem repetição",
+                   all(a.timestamp < b.timestamp for a, b in zip(recebidas, recebidas[1:])))
+        # RR é opcional (RF15): só informa, porque a pulseira pode não enviar
+        logging.info(f"Leituras com RR: {sum('rr' in m.conteudo for m in recebidas)} de {len(recebidas)}")
+    _verificar("sem a posse, nada é publicado", sem_posse_nao_publica)
+
+
 # ------------------------------------------------------------------ main
 
 async def main() -> None:
     """Descomente UM teste por vez."""
     try:
-        devices = await find_all_local_devices()
-        print(devices)
-        # await teste_rf15()                  # mensagens padronizadas: sem BLE e sem broker
+        # await teste_rf01()                # dispositivos BLE ao alcance
+        # await teste_rf02()                # localizar a pulseira
+        # await teste_rf15()                 # mensagens padronizadas: sem BLE e sem broker
         # await teste_rf11()                # broker, sem BLE (manual=True para docker stop/start)
         # await teste_rf12()                # presença, sinal de vida e last will
         # await teste_rf03()                # conectar à pulseira
@@ -557,7 +676,9 @@ async def main() -> None:
         # await teste_rf10()                # desconexão controlada
         # await teste_rf05()                # reconexão: provoque quedas (desconectar_apos=15 testa a intencional)
         # await teste_rf09()                # BLE + broker
+        # await teste_rf17()                # FC no broker (docker stop/start para o buffer)
         # await espiar("#")                 # num segundo terminal: tudo o que passa no broker
+        pass                                # mantém o bloco válido com todos os testes comentados
     except GatewayError as e:
         logging.error(f"Erro: {e.codigo} | {e}")
         _falhas.append(f"teste interrompido por {e.codigo}")

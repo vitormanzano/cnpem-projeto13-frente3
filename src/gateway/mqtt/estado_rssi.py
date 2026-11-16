@@ -1,6 +1,8 @@
 import asyncio
+import dataclasses
 import logging
 import os
+from datetime import datetime, timezone
 
 from bluetooth.domain.erros import BrokerIndisponivel
 from bluetooth.domain.models import LeituraRSSI
@@ -48,24 +50,47 @@ class EstadoRssiColetor:
             await self._publicar(leitura)
 
 
+    async def publicar_pendentes(self) -> None:
+        """Publica na hora as leituras que ainda estão na fila, na ordem em que chegaram.
+
+        Usada na desconexão controlada, para o estado desconectado sair antes da liberação da
+        posse e da presença offline (RF10). Sem broker, descarta: a reconexão republica a última.
+        """
+        while not self._fila.empty():
+            leitura = self._fila.get_nowait()
+            if self.broker.conectado:
+                await self._publicar(leitura)
+
+
     async def republicar_ultima(self) -> None:
-        """Republica o último estado da pulseira. Chaamada a cada (re)conexão ao broker"""
+        """Republica o último estado da pulseira. Chamada a cada (re)conexão ao broker e quando o
+        coordenador republica a posse deste coletor (RF19).
+
+        Sai com o horário atual: é o estado de agora, e o coordenador descarta mensagens mais antigas
+        que a última recebida do coletor (RF13), como a presença e o sinal de vida publicados depois
+        da leitura original.
+        """
         if self._ultima is not None:
-            await self._publicar(self._ultima)
+            await self._publicar(dataclasses.replace(self._ultima, timestamp=datetime.now(timezone.utc)))
     
 
     def mensagem(self, leitura: LeituraRSSI) -> Mensagem:
-        """Coletor (origem) e timestamp da leitura vão no envelope"""
+        """Coletor (origem) e timestamp da leitura vão no envelope.
+
+        `amostras` só existe na varredura (RF15, RF18): a conexão ativa lê um RSSI por vez.
+        """
+        conteudo = {
+            "pulseira": leitura.endereco,
+            "estado": leitura.estado.value,
+            "rssi": leitura.rssi,
+        }
+        if leitura.amostras is not None:
+            conteudo["amostras"] = leitura.amostras
         return Mensagem(
             tipo=TipoMensagem.ESTADO_PULSEIRA,
             origem=self.broker.cliente_id,
             timestamp=leitura.timestamp,
-            conteudo={
-                "pulseira": leitura.endereco,
-                "estado": leitura.estado.value,
-                "rssi": leitura.rssi,
-                "amostras": leitura.amostras
-            },
+            conteudo=conteudo,
         )
 
 

@@ -1,24 +1,47 @@
-from coordenador.visao import SinalColetor
+import math
+
+from coordenador.visao import Candidato
+
 
 MARGEM_HISTERESE_PADRAO = 5.0
-MINIMO_AMOSTRAS_PADRAO  = 5 # Talvez precise de ajuste (medir a quantidade de amostras que chega)
+# Médias ponderadas iguais podem diferir no último bit conforme a ordem das somas
+TOLERANCIA_RSSI = 1e-9
+
 
 def escolher_coletor(
-    sinais: dict[str, SinalColetor],
-    atual: str | None = None,
+    candidatos: dict[str, Candidato],
+    favorito: str | None = None,
     margem: float = MARGEM_HISTERESE_PADRAO,
-    minimo_amostras: int = MINIMO_AMOSTRAS_PADRAO
 ) -> str | None:
-    """Escolhe o coletor de maior RSSI suavizada, no empate, o de menor id.
+    """Escolhe o vencedor da disputa pela posse (RF14).
 
-    Se `atual` estiver entre os candidatos, só perde para quem for melhor por pelo menos `margem` dB (evitar ping-pong).
+    Vence o maior RSSI suavizado. No empate, vence o favorito; se ele não estiver no empate,
+    vence quem publicou primeiro na janela. O favorito que tem sinal válido na janela só perde
+    para quem for maior por pelo menos `margem` dB; sem sinal válido, vence o melhor, sem margem.
+
+    Args:
+        candidatos (dict[str, Candidato]): Coletores com sinal válido na janela.
+        favorito (str | None): Último coletor ativo da pulseira.
+        margem (float): Vantagem, em dB, que um candidato precisa ter sobre o favorito.
+
+    Returns:
+        str | None: O coletor vencedor, ou None sem candidatos.
     """
-    if not sinais:
+    if not candidatos:
         return None
-    melhor = min(sinais, key=lambda c: (-sinais[c].rssi_suavizada, c))
-    if atual in sinais and melhor != atual:
-        desafiante, favorito = sinais[melhor], sinais[atual]
-        if ( (desafiante.rssi_suavizada - favorito.rssi_suavizada) < margem
-            or desafiante.total_amostras < minimo_amostras):
-            return atual
+
+    maior = max(candidato.rssi_suavizado for candidato in candidatos.values())
+    empatados = [
+        coletor for coletor, candidato in candidatos.items()
+        if math.isclose(candidato.rssi_suavizado, maior, abs_tol=TOLERANCIA_RSSI)
+    ]
+    if favorito in empatados:
+        return favorito
+    # O horário de chegada ao coordenador, e não o timestamp do envelope: cada coletor tem o seu relógio
+    melhor = min(empatados, key=lambda coletor: candidatos[coletor].primeira_em)
+
+    if favorito in candidatos:
+        vantagem = candidatos[melhor].rssi_suavizado - candidatos[favorito].rssi_suavizado
+        if vantagem + TOLERANCIA_RSSI < margem:
+            return favorito
     return melhor
