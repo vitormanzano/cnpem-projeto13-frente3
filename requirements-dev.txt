@@ -1,0 +1,4 @@
+# Dependências de desenvolvimento: as de produção mais as ferramentas de teste.
+# Fica fora do requirements.txt para não entrar na imagem Docker dos coletores.
+-r requirements.txt
+pytest==9.2.0
