@@ -2,3 +2,4 @@
 # Fica fora do requirements.txt para não entrar na imagem Docker dos coletores.
 -r requirements.txt
 pytest==9.2.0
+pyyaml==6.0.3

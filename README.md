@@ -61,6 +61,7 @@ Os valores acima são os padrões e podem ser mudados no `.env`. Os tópicos e o
 | HiveMQ CE | 2026.5 | *Broker* MQTT |
 | Docker Engine e Docker Compose | — | Implantação, com os *profiles* `central` e `coletor` |
 | pytest | 9.2.0 | Testes automatizados (só desenvolvimento) |
+| PyYAML | 6.0.3 | Testes da configuração (só desenvolvimento) |
 
 As dependências ficam fixadas em `requirements.txt` (produção, entra na imagem) e `requirements-dev.txt` (acrescenta o pytest).
 
@@ -182,7 +183,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-São 179 testes, que rodam em menos de 10 s sem pulseira, sem Bluetooth e sem *broker*: dublês fazem o papel do bleak e do aiomqtt, e relógios falsos verificam os prazos sem esperar. Cada arquivo também roda sozinho, sem o pytest: `python tests/test_coordenador.py`.
+São 198 testes, que rodam em menos de 10 s sem pulseira, sem Bluetooth e sem *broker*: dublês fazem o papel do bleak e do aiomqtt, e relógios falsos verificam os prazos sem esperar. Cada arquivo também roda sozinho, sem o pytest: `python tests/test_coordenador.py`.
 
 | Arquivo | Testes | Requisitos |
 |---|---|---|
@@ -196,6 +197,9 @@ São 179 testes, que rodam em menos de 10 s sem pulseira, sem Bluetooth e sem *b
 | `test_frequencia_cardiaca.py` | 15 | RF17 |
 | `test_coordenador.py` | 54 | RF06, RF13, RF14, RF19 |
 | `test_painel.py` | 22 | RF20 |
+| `test_app.py` | 5 | Ponto de entrada (`PAPEL`) |
+| `test_logs.py` | 7 | RNF10 |
+| `test_configuracao.py` | 7 | RNF07, RF14 (compose e `.env.example`) |
 
 ### Diagnóstico com hardware (`main.py`)
 

@@ -3,6 +3,11 @@ x-gateway: &gateway
   restart: unless-stopped
   env_file: .env
   command: ["python", "src/gateway/app.py"] # O CMD do Dockerfile roda o main.py (roteiro de testes)
+  logging: &rotacao_logs # RNF07: rotação dos logs, 10 arquivos de 10 MB = até 100 MB por nó
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "10"
 
 services:
   hivemq:
@@ -10,6 +15,7 @@ services:
     container_name: cnpem_hivemq
     profiles: [central]
     restart: unless-stopped
+    logging: *rotacao_logs
     ports:
       - "1883:1883"
     volumes:

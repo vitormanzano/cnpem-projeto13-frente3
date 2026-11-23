@@ -14,20 +14,15 @@ from mqtt.conexao import ConexaoBroker
 from painel.painel import Painel, identificador_painel, ler_modo_simulado, ler_pulseiras_painel
 from painel.servidor import ServidorPainel
 from painel.simulador import PULSEIRA_SIMULADA, SimuladorPulseira
-
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
-    format="%(asctime)s %(levelname)s %(message)s",
-)
-
-# Bibliotecas que ficam muito verbosas em DEBUG
-logging.getLogger("bleak").setLevel(logging.WARNING)
-logging.getLogger("aiomqtt").setLevel(logging.WARNING)
+from logs import configurar_logs, definir_no
 
 load_dotenv()
+configurar_logs()
+
 
 async def rodar_coletor() -> None:
     cliente_id = identificador_coletor()
+    definir_no(cliente_id)
     try:
         endereco = ler_endereco_pulseira()
     except ValueError as e:
@@ -40,6 +35,7 @@ async def rodar_coletor() -> None:
 
 async def rodar_coordenador() -> None:
     cliente_id = identificador_coordenador()
+    definir_no(cliente_id)
     logging.info(f"Iniciando como coordenador | id {cliente_id}")
     try:
         coordenador = Coordenador(ConexaoBroker(cliente_id=cliente_id))
@@ -57,6 +53,7 @@ async def rodar_painel() -> None:
         if simulado and PULSEIRA_SIMULADA not in pulseiras:
             pulseiras.append(PULSEIRA_SIMULADA)
         cliente_id = identificador_painel()
+        definir_no(cliente_id)
         painel = Painel(ConexaoBroker(cliente_id=cliente_id), pulseiras, simulado=simulado)
         servidor = ServidorPainel(painel)
         servicos = [servidor.executar]
